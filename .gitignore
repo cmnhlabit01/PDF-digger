@@ -1,0 +1,34 @@
+# Python Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Secrets and Local Config (Never commit API Keys)
+.env
+.streamlit/secrets.toml
+*.key
+
+# macOS System Files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# PyInstaller / Build outputs / macOS App bundle
+build/
+dist/
+*.spec
+.pyinstaller_cache/
+PDF Digger.app/
+
+# Test & runtime outputs
+test_output/
+*.docx
+*.log
