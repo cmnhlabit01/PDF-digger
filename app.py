@@ -7,11 +7,11 @@ import streamlit as st
 import pymupdf as fitz
 
 from src.config import DEFAULT_FONT, FALLBACK_MODELS
-from src.pdf_processor import PDFProcessor
+from src.pdf_processor import PDFProcessor, SUPPORTED_IMAGE_EXTENSIONS
 from src.pipeline import PDFToWordPipeline
 
 st.set_page_config(
-    page_title="PDF Digger - แกะ PDF ภาษาไทย/อังกฤษ เป็น Word",
+    page_title="PDF Digger - แกะ PDF / รูปภาพ เป็น Word",
     page_icon="📄",
     layout="wide",
 )
@@ -46,8 +46,8 @@ st.markdown(
 def main():
     st.markdown('<div class="main-title">📄 PDF Digger</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="sub-title">ระบบแกะข้อความภาษาไทย/อังกฤษ ตาราง และรูปภาพจาก PDF '
-        '(ทั้งดิจิทัลและภาพสแกน) เป็น Word (.docx) พร้อมตรวจจับฟอนต์ต้นฉบับอัตโนมัติ</div>',
+        '<div class="sub-title">ระบบแกะข้อความภาษาไทย/อังกฤษ ตาราง และรูปภาพจาก PDF และไฟล์รูปภาพ '
+        '(ทั้งดิจิทัลและภาพสแกน) เป็น Word (.docx) พร้อมแปลภาษาและตรวจจับฟอนต์อัตโนมัติ</div>',
         unsafe_allow_html=True,
     )
 
@@ -87,21 +87,32 @@ def main():
             )
             api_key = api_key_input.strip()
 
-        # 2. เลือกลำดับโมเดล
-        st.subheader("🤖 โมเดล AI")
-        primary_model = st.selectbox(
-            "โมเดลเริ่มต้นที่ต้องการใช้",
-            options=FALLBACK_MODELS,
+        # 2. แปลภาษา
+        st.subheader("🌐 การแปลภาษา (Translation)")
+        translate_dict = {
+            "original": "📄 คงภาษาตามต้นฉบับ (ไม่แปล)",
+            "th": "🇹🇭 แปลเป็นภาษาไทย (Translate to Thai)",
+            "en": "🇬🇧 แปลเป็นภาษาอังกฤษ (Translate to English)",
+            "zh": "🇨🇳 แปลเป็นภาษาจีน (Translate to Chinese)",
+            "ja": "🇯🇵 แปลเป็นภาษาญี่ปุ่น (Translate to Japanese)",
+        }
+        target_language = st.selectbox(
+            "เลือกภาษาเป้าหมาย",
+            options=list(translate_dict.keys()),
+            format_func=lambda x: translate_dict[x],
             index=0,
-            help="ระบบจะใช้โมเดลนี้ก่อน หากติด 429 Quota Exceeded จะสลับไปตัวถัดไปให้อัตโนมัติ",
+            help="ระบบจะแปลเนื้อหาทั้งหมดรวมถึงตารางเป็นภาษาที่เลือกในรอบเดียวโดยยังคงโครงสร้างตารางและรูปภาพครบถ้วน",
         )
 
-        st.info(
-            "🔄 **Seamless Fallback:**\n"
-            f"หากโมเดลหลักโควตาเต็ม ระบบจะสลับไป `{FALLBACK_MODELS[1]}` ➔ `{FALLBACK_MODELS[2]}` ให้อัตโนมัติทันที"
+        # 3. โหมดปรับความคมชัดภาพ
+        st.subheader("✨ ปรับแต่งภาพสแกน (Image Enhancement)")
+        enhance_image = st.checkbox(
+            "เปิดโหมดเพิ่มความคมชัดพิเศษ",
+            value=False,
+            help="เหมาะสำหรับภาพสแกนกระดาษเหลือง หมึกจาง หรือภาพถ่ายจากมือถือ ระบบจะปรับ Auto-contrast และ Sharpness ให้ตัวหนังสือเด่นชัดขึ้น",
         )
 
-        # 3. แบบอักษร Word
+        # 4. แบบอักษร Word
         st.subheader("🔤 แบบอักษร Word")
         font_options = [
             "🔍 ตรวจจับจากต้นฉบับอัตโนมัติ (Auto-detect)",
@@ -119,53 +130,83 @@ def main():
             help="หากเลือก Auto-detect ระบบจะดึงฟอนต์ที่ใช้จริงจาก PDF ต้นฉบับมาใช้ใน Word ทันที",
         )
 
+        # 5. เลือกลำดับโมเดล
+        st.subheader("🤖 โมเดล AI")
+        primary_model = st.selectbox(
+            "โมเดลเริ่มต้นที่ต้องการใช้",
+            options=FALLBACK_MODELS,
+            index=0,
+            help="ระบบจะใช้โมเดลนี้ก่อน หากติด 429 Quota Exceeded จะสลับไปตัวถัดไปให้อัตโนมัติ",
+        )
+
+        st.info(
+            "🔄 **Seamless Fallback:**\n"
+            f"หากโมเดลหลักโควตาเต็ม ระบบจะสลับไป `{FALLBACK_MODELS[1]}` ➔ `{FALLBACK_MODELS[2]}` ให้อัตโนมัติทันที"
+        )
+
     # --- Main Area ---
     if not api_key or api_key == "your_gemini_api_key_here":
         st.warning("⚠️ กรุณาระบุ **Gemini API Key** ในแถบด้านซ้ายก่อนเริ่มใช้งาน")
         st.info("💡 คุณสามารถขอรับ Gemini API Key ฟรีได้จาก [Google AI Studio](https://aistudio.google.com/)")
         return
 
-    uploaded_file = st.file_uploader("เลือกหรือลากไฟล์ PDF มาวางที่นี่", type=["pdf"])
+    allowed_types = ["pdf", "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"]
+    uploaded_file = st.file_uploader(
+        "เลือกหรือลากไฟล์ PDF หรือไฟล์รูปภาพ (.png, .jpg, .webp) มาวางที่นี่",
+        type=allowed_types,
+    )
 
     if uploaded_file is not None:
-        # บันทึกไฟล์ชั่วคราวเพื่ออ่านด้วย fitz
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-            tmp_pdf.write(uploaded_file.read())
-            tmp_pdf_path = Path(tmp_pdf.name)
+        file_ext = Path(uploaded_file.name).suffix.lower()
+        is_direct_image = file_ext in SUPPORTED_IMAGE_EXTENSIONS
 
-        doc = fitz.open(tmp_pdf_path)
-        total_pages = len(doc)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            tmp_file_path = Path(tmp_file.name)
+
+        if is_direct_image:
+            total_pages = 1
+            file_type_label = "รูปภาพเดี่ยว"
+        else:
+            with fitz.open(tmp_file_path) as doc:
+                total_pages = len(doc)
+            file_type_label = "เอกสาร PDF"
 
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("ชื่อไฟล์", uploaded_file.name)
         with col2:
-            st.metric("จำนวนหน้าทั้งหมด", f"{total_pages} หน้า")
+            st.metric("ประเภท / จำนวนหน้า", f"{file_type_label} ({total_pages} หน้า)")
         with col3:
             file_size_mb = uploaded_file.size / (1024 * 1024)
             st.metric("ขนาดไฟล์", f"{file_size_mb:.2f} MB")
 
         # ตรวจสอบฟอนต์ต้นฉบับเบื้องต้น
-        temp_processor = PDFProcessor(tmp_pdf_path)
+        temp_processor = PDFProcessor(tmp_file_path)
         pre_detected_font = temp_processor.detect_font()
         if pre_detected_font:
             st.info(f"🔤 **ตรวจพบฟอนต์ต้นฉบับใน PDF:** `{pre_detected_font}` (ระบบจะนำฟอนต์นี้ไปจัดหน้าใน Word ให้อัตโนมัติ)")
         else:
-            st.caption("ℹ️ เอกสารอาจเป็นภาพสแกน ระบบจะวิเคราะห์ฟอนต์จากลักษณะตัวอักษร หรือใช้ Cordia New เป็นค่าเริ่มต้น")
+            st.caption("ℹ️ ภาพสแกน/รูปภาพ ระบบจะวิเคราะห์ฟอนต์จากลักษณะตัวอักษร หรือใช้ Cordia New เป็นค่าเริ่มต้นที่ปลอดภัย")
 
         # แสดงตัวอย่างหน้าแรก
-        with st.expander("🔍 ดูตัวอย่างหน้าเอกสาร PDF (หน้า 1)", expanded=False):
-            page_0 = doc[0]
-            pix = page_0.get_pixmap(dpi=150)
-            img_bytes = pix.tobytes(output="png")
-            st.image(img_bytes, caption="ตัวอย่างหน้า 1", use_container_width=True)
-
-        doc.close()
+        with st.expander("🔍 ดูตัวอย่างหน้าเอกสาร (หน้า 1)", expanded=False):
+            if is_direct_image:
+                st.image(str(tmp_file_path), caption=uploaded_file.name, use_container_width=True)
+            else:
+                with fitz.open(tmp_file_path) as doc:
+                    page_0 = doc[0]
+                    pix = page_0.get_pixmap(dpi=150)
+                    img_bytes = pix.tobytes(output="png")
+                    st.image(img_bytes, caption="ตัวอย่างหน้า 1", use_container_width=True)
 
         st.divider()
 
         # ปุ่มเริ่มการแปลงไฟล์
-        start_btn = st.button("🚀 เริ่มแปลงเอกสารเป็น Word (.docx)", type="primary", use_container_width=True)
+        btn_label = "🚀 เริ่มแปลงเอกสารเป็น Word (.docx)"
+        if target_language != "original":
+            btn_label += f" [แปลเป็น: {translate_dict[target_language]}]"
+        start_btn = st.button(btn_label, type="primary", use_container_width=True)
 
         if start_btn:
             # จัดเตรียมลำดับโมเดลตามที่เลือก
@@ -181,7 +222,7 @@ def main():
             is_auto_font = font_choice.startswith("🔍")
             target_font = None if is_auto_font else font_choice
 
-            output_docx_path = tmp_pdf_path.with_suffix(".docx")
+            output_docx_path = tmp_file_path.with_suffix(".docx")
 
             def update_progress_ui(current: int, total: int, msg: str):
                 progress_bar.progress(int((current / total) * 100))
@@ -193,12 +234,16 @@ def main():
                     font_name=target_font,
                     auto_detect_font=is_auto_font,
                     models=models_to_use,
+                    target_language=target_language,
+                    enhance_image=enhance_image,
                 )
 
                 report = pipeline.convert(
-                    pdf_path=tmp_pdf_path,
+                    pdf_path=tmp_file_path,
                     output_docx_path=output_docx_path,
                     progress_callback=update_progress_ui,
+                    target_language=target_language,
+                    enhance_image=enhance_image,
                 )
 
                 progress_bar.progress(100)
@@ -218,6 +263,12 @@ def main():
                     if report.detected_font:
                         font_lbl += " (ตรวจพบ)"
                     st.metric("ฟอนต์ใน Word", font_lbl)
+
+                if report.target_language != "original":
+                    st.info(f"🌐 **เอกสารถูกแปลเป็น:** {translate_dict.get(report.target_language, report.target_language)}")
+
+                if report.enhanced:
+                    st.caption("✨ ประมวลผลด้วยโหมดปรับความคมชัดพิเศษ (Enhanced Mode)")
 
                 if report.fallback_events:
                     st.warning("⚠️ **บันทึกการสลับโมเดลสำรอง (Seamless Fallback):**")
@@ -249,8 +300,8 @@ def main():
             except Exception as e:
                 st.error(f"❌ เกิดข้อผิดพลาดระหว่างประมวลผล: {e}")
             finally:
-                if tmp_pdf_path.exists():
-                    tmp_pdf_path.unlink()
+                if tmp_file_path.exists():
+                    tmp_file_path.unlink()
                 if output_docx_path.exists():
                     output_docx_path.unlink()
 

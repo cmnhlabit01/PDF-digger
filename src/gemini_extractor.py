@@ -1,4 +1,5 @@
 import logging
+import re
 import threading
 import time
 from typing import Callable, List, Optional, Tuple
@@ -10,11 +11,11 @@ from .config import FALLBACK_MODELS, get_api_key
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """คุณคือระบบ OCR และ Document Structure Extractor ระดับสูงที่มีความเชี่ยวชาญพิเศษด้านภาษาไทยและภาษาอังกฤษ
-หน้าที่ของคุณคือแกะตัวอักษรและโครงสร้างทั้งหมดจากภาพหน้าเอกสารที่ได้รับ และแปลงเป็น Markdown โดยมีกฎเหล็กดังต่อไปนี้:
+SYSTEM_PROMPT = """คุณคือระบบ OCR, Document Structure Extractor และ Multilingual Translation ระดับสูงที่มีความเชี่ยวชาญพิเศษด้านภาษาไทยและภาษาอังกฤษ
+หน้าที่ของคุณคือแกะตัวอักษร โครงสร้างทั้งหมด และแปลภาษา (หากได้รับคำสั่ง) จากภาพหน้าเอกสารที่ได้รับ และแปลงเป็น Markdown โดยมีกฎเหล็กดังต่อไปนี้:
 
 1. ความถูกต้องของภาษาไทยและอังกฤษ (Verbatim & Accurate):
-   - แกะข้อความตามต้นฉบับคำต่อคำ ห้ามสรุปความ ห้ามตัดทอน ห้ามแต่งเติมเด็ดขาด
+   - หากไม่ได้สั่งให้แปลภาษา ให้แกะข้อความตามต้นฉบับคำต่อคำ ห้ามสรุปความ ห้ามตัดทอน ห้ามแต่งเติมเด็ดขาด
    - รักษาความถูกต้องของสระและวรรณยุกต์ภาษาไทย 100% เช่น สระอิ สระอี ไม้เอก ไม้โท ไม้ตรี ไม้จัตวา สระอำ (ำ) การันต์ (์) รวมถึงสระลอยและวรรณยุกต์ซ้อน
    - เว้นวรรคคำภาษาไทยให้ถูกต้องเป็นธรรมชาติ ไม่เว้นวรรคมั่วกลางคำ
 
@@ -42,13 +43,24 @@ SYSTEM_PROMPT = """คุณคือระบบ OCR และ Document Structu
      `[FONT: TH Sarabun New]`
      หากไม่แน่ใจ ไม่จำเป็นต้องใส่แท็กนี้
 
-6. ผลลัพธ์:
+6. การจัดการกรณีข้อความไม่ชัดเจนหรืออ่านไม่ออก (Handling Illegible/Blurry Content):
+   - ห้ามเดาหรือแต่งเติมคำ/ตัวเลขขึ้นมาเองโดยเด็ดขาด (Strict Anti-Hallucination) โดยเฉพาะในเอกสารสัญญาหรือตัวเลขการเงิน
+   - หากคำใดหรือตัวเลขใดเบลอมากจนไม่มั่นใจ ให้ทำเครื่องหมาย `[ข้อความไม่ชัดเจน]` หรือ `[ตัวเลขไม่ชัดเจน]` ไว้อย่างชัดเจน
+   - หากอ่านได้บางส่วน ให้ถอดเฉพาะส่วนที่มั่นใจ เช่น `บริษัท เค... [ไม่ชัดเจน] จำกัด`
+   - หากทั้งหน้านี้มืดสนิท เลือนราง หรือไม่สามารถอ่านได้เลย ให้ระบุว่า `> ⚠️ [หมายเหตุ: หน้าเอกสารต้นฉบับมีความคมชัดต่ำมาก ไม่สามารถถอดรหัสตัวหนังสือได้]`
+
+7. การแปลภาษา (Language Translation - เมื่อได้รับคำสั่งให้แปล):
+   - หากมีคำสั่งให้แปลเนื้อหาเป็นภาษาเป้าหมาย ให้แปลข้อความทั้งหมด (รวมถึงหัวข้อ รายการ และข้อความในเซลล์ตาราง) ออกมาเป็นภาษาเป้าหมายอย่างสละสลวย ถูกต้องตามหลักภาษาและบริบทวิชาชีพ
+   - โครงสร้างเอกสาร: หัวข้อ (#, ##), รายการ, ตาราง (|---|), และแท็ก [IMAGE] ต้องคงอยู่ในตำแหน่งเดิม 100%
+   - ชื่อเฉพาะ รหัสเอกสาร สกุลเงิน ตัวเลขทางคณิตศาสตร์ และสูตร ให้คงไว้ตามความเหมาะสม
+
+8. ผลลัพธ์:
    - ส่งออกผลลัพธ์เป็นข้อความ Markdown ล้วนๆ ไม่ต้องใส่ข้อความอธิบายทักทายใดๆ นอกเหนือจากเนื้อหาของเอกสาร
 """
 
 
 class GeminiExtractor:
-    """โมดูลติดต่อ Gemini API พร้อมระบบ Seamless Model Fallback อัตโนมัติ"""
+    """โมดูลติดต่อ Gemini API พร้อมระบบ Seamless Model Fallback อัตโนมัติและการแปลภาษา"""
 
     def __init__(
         self,
@@ -74,20 +86,42 @@ class GeminiExtractor:
             return self.models[self.current_model_idx]
 
     def extract_page_markdown(
-        self, image_bytes: bytes, page_num: int
+        self,
+        image_bytes: bytes,
+        page_num: int,
+        target_language: Optional[str] = "original",
     ) -> Tuple[str, str, Optional[str]]:
         """
-        ประมวลผลภาพหน้า PDF โดยส่งให้ Gemini อ่านข้อความ ตาราง และสังเกตฟอนต์
+        ประมวลผลภาพหน้า PDF/Image โดยส่งให้ Gemini อ่านข้อความ ตาราง สังเกตฟอนต์ และแปลภาษา (ถ้ามี)
         หากโมเดลปัจจุบันติด 429 Quota Exceeded หรือ Error จะสลับไปโมเดลสำรองถัดไปทันที
         ส่งคืน: (markdown_text, model_used, detected_font)
         """
-        import re
         from .font_detector import clean_font_name
 
-        prompt = (
-            f"นี่คือหน้า {page_num + 1} ของเอกสาร กรุณาแกะข้อความ หัวข้อ รายการ ตาราง "
-            f"ระบุตำแหน่งรูปภาพ [IMAGE] และสังเกตฟอนต์ [FONT: ...] ตามกฎที่กำหนดอย่างเคร่งครัด"
-        )
+        lang_instructions = {
+            "th": "และแปลเนื้อหาทั้งหมดเป็นภาษาไทย (Translate into natural, professional Thai) อย่างสละสลวยและถูกต้อง",
+            "en": "และแปลเนื้อหาทั้งหมดเป็นภาษาอังกฤษ (Translate into natural, professional English) อย่างสละสลวยและถูกต้อง",
+            "zh": "และแปลเนื้อหาทั้งหมดเป็นภาษาจีน (Translate into Chinese / 简体中文) อย่างสละสลวยและถูกต้อง",
+            "ja": "และแปลเนื้อหาทั้งหมดเป็นภาษาญี่ปุ่น (Translate into Japanese / 日本語) อย่างสละสลวยและถูกต้อง",
+        }
+
+        trans_inst = ""
+        if target_language and target_language.lower() not in ("original", "none"):
+            trans_inst = lang_instructions.get(
+                target_language.lower(),
+                f"และแปลเนื้อหาทั้งหมดเป็นภาษา {target_language} อย่างถูกต้องและเป็นธรรมชาติ",
+            )
+
+        if trans_inst:
+            prompt = (
+                f"นี่คือหน้า {page_num + 1} ของเอกสาร กรุณาแกะข้อความ หัวข้อ รายการ ตาราง {trans_inst} "
+                f"โดยยังคงรักษาโครงสร้างตาราง หัวข้อ รายการ ตัวเลข สัญลักษณ์ทางคณิตศาสตร์ และตำแหน่งรูปภาพ [IMAGE] ไว้อย่างครบถ้วนตามกฎที่กำหนด"
+            )
+        else:
+            prompt = (
+                f"นี่คือหน้า {page_num + 1} ของเอกสาร กรุณาแกะข้อความ หัวข้อ รายการ ตาราง "
+                f"ระบุตำแหน่งรูปภาพ [IMAGE] และสังเกตฟอนต์ [FONT: ...] ตามกฎที่กำหนดอย่างเคร่งครัด"
+            )
 
         mime_type = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
@@ -99,7 +133,7 @@ class GeminiExtractor:
             attempts += 1
             model_name = self.current_model
             try:
-                logger.info(f"[Page {page_num + 1}] ส่งให้โมเดล {model_name} ประมวลผล...")
+                logger.info(f"[Page {page_num + 1}] ส่งให้โมเดล {model_name} ประมวลผล (ภาษา: {target_language})...")
 
                 response = self.client.models.generate_content(
                     model=model_name,

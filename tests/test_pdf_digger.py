@@ -10,7 +10,7 @@ from PIL import Image
 from src.config import DEFAULT_FONT, FALLBACK_MODELS
 from src.docx_builder import DocxBuilder
 from src.gemini_extractor import GeminiExtractor
-from src.pdf_processor import ExtractedImage, PDFProcessor
+from src.pdf_processor import ExtractedImage, PDFProcessor, enhance_document_image
 
 
 class TestPDFDigger(unittest.TestCase):
@@ -92,7 +92,7 @@ class TestPDFDigger(unittest.TestCase):
         print("\n✅ ทดสอบ DocxBuilder (ฟอนต์ Cordia New, ตาราง, รูปภาพ) สำเร็จ")
 
     def test_pdf_processor_rendering(self):
-        """ทดสอบการเปิดและเรนเดอร์หน้า PDF เป็นภาพ 300 DPI"""
+        """ทดสอบการเปิดและเรนเดอร์หน้า PDF เป็นภาพ 200 DPI"""
         test_pdf = self.test_dir / "sample.pdf"
 
         # สร้าง PDF ตัวอย่างด้วย PyMuPDF
@@ -116,7 +116,7 @@ class TestPDFDigger(unittest.TestCase):
         self.assertGreater(len(page_data.rendered_image_bytes), 0)
         self.assertGreaterEqual(len(page_data.embedded_images), 1)
         self.assertEqual(page_data.embedded_images[0].ext, "png")
-        print("✅ ทดสอบ PDFProcessor (เรนเดอร์ 300 DPI และสกัดภาพ) สำเร็จ")
+        print("✅ ทดสอบ PDFProcessor (เรนเดอร์ 200 DPI และสกัดภาพ) สำเร็จ")
 
     def test_gemini_fallback_mechanism(self):
         """ทดสอบระบบ Seamless Fallback เมื่อโมเดลแรกติด 429 Quota Exceeded"""
@@ -191,6 +191,58 @@ class TestPDFDigger(unittest.TestCase):
         self.assertIsNotNone(detected)
         self.assertEqual(detected, "Arial")  # helv mapped to Arial
         print("✅ ทดสอบ Font Detector (ตรวจจับและแปลงชื่อฟอนต์ต้นฉบับ) สำเร็จ")
+
+    def test_image_support_and_enhancement(self):
+        """ทดสอบการรองรับไฟล์รูปภาพโดยตรง (.png) และระบบ Image Enhancement"""
+        test_img_path = self.test_dir / "sample_scan.png"
+        img = Image.new("RGB", (800, 600), color=(240, 235, 220))  # กระดาษอมเหลือง
+        img.save(test_img_path)
+
+        # 1. ตรวจสอบว่า PDFProcessor จัดการรูปภาพได้ถูกต้อง
+        processor = PDFProcessor(test_img_path)
+        self.assertTrue(processor.is_image)
+        self.assertEqual(processor.get_page_count(), 1)
+        self.assertIsNone(processor.detect_font())
+
+        # 2. ตรวจสอบการแปลงและการเปิดโหมด enhance
+        p_data = processor.process_page(0, enhance=True)
+        self.assertGreater(len(p_data.rendered_image_bytes), 0)
+
+        # 3. ตรวจสอบฟังก์ชัน enhance_document_image โดยตรง
+        enhanced_bytes = enhance_document_image(p_data.rendered_image_bytes)
+        self.assertGreater(len(enhanced_bytes), 0)
+        print("✅ ทดสอบ Direct Image Input & Image Enhancement สำเร็จ")
+
+    def test_translation_prompt_generation(self):
+        """ทดสอบการสร้างคำสั่งแปลภาษา (Target Language) ใน GeminiExtractor"""
+        with patch("src.gemini_extractor.genai.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            captured_prompt = None
+
+            def mock_generate_content(model, contents, config):
+                nonlocal captured_prompt
+                captured_prompt = contents[1]  # prompt string
+                mock_resp = MagicMock()
+                mock_resp.text = "# Translated Content in Thai\nเนื้อหาที่แปลเป็นไทย"
+                return mock_resp
+
+            mock_client.models.generate_content.side_effect = mock_generate_content
+
+            extractor = GeminiExtractor(api_key="test-api-key")
+            dummy_bytes = b"fake-image-bytes"
+
+            # ทดสอบแปลเป็นไทย
+            result, _, _ = extractor.extract_page_markdown(dummy_bytes, 0, target_language="th")
+            self.assertIn("แปลเนื้อหาทั้งหมดเป็นภาษาไทย", captured_prompt)
+            self.assertIn("Translated Content", result)
+
+            # ทดสอบแปลเป็นอังกฤษ
+            result_en, _, _ = extractor.extract_page_markdown(dummy_bytes, 0, target_language="en")
+            self.assertIn("แปลเนื้อหาทั้งหมดเป็นภาษาอังกฤษ", captured_prompt)
+
+            print("✅ ทดสอบ Translation Prompt Generation (แปลไทย/อังกฤษ) สำเร็จ")
 
 
 if __name__ == "__main__":
