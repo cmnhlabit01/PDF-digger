@@ -111,8 +111,8 @@ class DocxBuilder:
         style_normal = self.doc.styles["Normal"]
         style_normal.font.name = self.font_name
         style_normal.font.size = Pt(self.font_sizes["body"])
-        style_normal.paragraph_format.line_spacing = 1.15
-        style_normal.paragraph_format.space_after = Pt(2)
+        style_normal.paragraph_format.line_spacing = 1.10
+        style_normal.paragraph_format.space_after = Pt(1.5)
 
     def parse_line_formatting(self, raw_line: str) -> Tuple[str, Optional[WD_ALIGN_PARAGRAPH], bool]:
         """
@@ -201,7 +201,7 @@ class DocxBuilder:
             # 4. ตรวจสอบหัวข้อ (Headings)
             if line.startswith("### "):
                 p = self.doc.add_paragraph()
-                p.paragraph_format.space_before = Pt(3)
+                p.paragraph_format.space_before = Pt(2)
                 p.paragraph_format.space_after = Pt(1)
                 p.paragraph_format.keep_with_next = True
                 if alignment:
@@ -212,8 +212,8 @@ class DocxBuilder:
                 continue
             elif line.startswith("## "):
                 p = self.doc.add_paragraph()
-                p.paragraph_format.space_before = Pt(4)
-                p.paragraph_format.space_after = Pt(2)
+                p.paragraph_format.space_before = Pt(2.5)
+                p.paragraph_format.space_after = Pt(1)
                 p.paragraph_format.keep_with_next = True
                 if alignment:
                     p.alignment = alignment
@@ -223,8 +223,8 @@ class DocxBuilder:
                 continue
             elif line.startswith("# "):
                 p = self.doc.add_paragraph()
-                p.paragraph_format.space_before = Pt(6)
-                p.paragraph_format.space_after = Pt(2)
+                p.paragraph_format.space_before = Pt(4)
+                p.paragraph_format.space_after = Pt(1.5)
                 p.paragraph_format.keep_with_next = True
                 if alignment:
                     p.alignment = alignment
@@ -238,7 +238,7 @@ class DocxBuilder:
                 p = self.doc.add_paragraph(style="List Bullet")
                 p.paragraph_format.space_before = Pt(0)
                 p.paragraph_format.space_after = Pt(1)
-                p.paragraph_format.line_spacing = 1.15
+                p.paragraph_format.line_spacing = 1.10
                 if alignment:
                     p.alignment = alignment
                 font_sz = self.font_sizes["body"] if not is_small else self.font_sizes["small"]
@@ -252,7 +252,7 @@ class DocxBuilder:
                 p = self.doc.add_paragraph(style="List Number")
                 p.paragraph_format.space_before = Pt(0)
                 p.paragraph_format.space_after = Pt(1)
-                p.paragraph_format.line_spacing = 1.15
+                p.paragraph_format.line_spacing = 1.10
                 if alignment:
                     p.alignment = alignment
                 font_sz = self.font_sizes["body"] if not is_small else self.font_sizes["small"]
@@ -263,8 +263,8 @@ class DocxBuilder:
             # 7. ย่อหน้าปกติ (Paragraph)
             p = self.doc.add_paragraph()
             p.paragraph_format.space_before = Pt(0)
-            p.paragraph_format.space_after = Pt(2)
-            p.paragraph_format.line_spacing = 1.15
+            p.paragraph_format.space_after = Pt(1.5)
+            p.paragraph_format.line_spacing = 1.10
             if alignment:
                 p.alignment = alignment
                 if alignment == WD_ALIGN_PARAGRAPH.JUSTIFY:
@@ -387,18 +387,19 @@ class DocxBuilder:
                 col.width = Inches(col_widths[c_idx])
 
         # คำนวณขนาดตัวอักษรสำหรับตารางให้กะทัดรัด พอดีกับช่องเอกสาร
-        table_font_size = max(9.0, self.font_sizes["body"] - 3.0)
-        header_font_size = max(10.0, self.font_sizes["body"] - 2.0)
+        table_font_size = max(9.0, min(11.5, self.font_sizes["body"] - 4.5))
+        header_font_size = max(10.0, min(12.5, self.font_sizes["body"] - 3.5))
 
         for row_idx, row_data in enumerate(parsed_rows):
-            is_header = (row_idx == 0 and len(parsed_rows) > 1)
+            # ใช้ tblHeader เฉพาะตารางข้อมูลยาว (>= 6 แถว) เพื่อไม่ให้วนซ้ำในตารางขั้นตอนสั้นๆ
+            is_header = (row_idx == 0 and len(parsed_rows) >= 6)
             row = table.rows[row_idx]
 
             # กำหนดคุณสมบัติไม่ให้แถวแตกข้ามหน้าถ้าไม่จำเป็น
             trPr = row._tr.get_or_add_trPr()
             trPr.append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
 
-            # ถ้าเป็นหัวตาราง ให้วนซ้ำหัวตารางเมื่อขึ้นหน้าใหม่ (Repeat Header Row)
+            # ถ้าเป็นหัวตารางของตารางยาว ให้วนซ้ำหัวตารางเมื่อขึ้นหน้าใหม่ (Repeat Header Row)
             if is_header:
                 trPr.append(parse_xml(f'<w:tblHeader {nsdecls("w")}/>'))
 
@@ -428,9 +429,9 @@ class DocxBuilder:
                     else:
                         p = cell.add_paragraph()
 
-                    p.paragraph_format.space_before = Pt(1)
-                    p.paragraph_format.space_after = Pt(1)
-                    p.paragraph_format.line_spacing = 1.05
+                    p.paragraph_format.space_before = Pt(0.5)
+                    p.paragraph_format.space_after = Pt(0.5)
+                    p.paragraph_format.line_spacing = 1.0
 
                     # ตรวจสอบแท็กรูปภาพ [IMAGE] ในเซลล์ตาราง (เช่น บาร์โค้ดหรือโลโก้)
                     if "[IMAGE]" in line_str.upper():

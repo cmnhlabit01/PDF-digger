@@ -171,61 +171,59 @@ class PDFProcessor:
         seen_rects = set()
         page_area = page.rect.width * page.rect.height
 
+        # 1. รวบรวม Bounding Box ของภาพทั้งหมดบนหน้า
+        raw_rects = []
         for img_info in image_list:
             xref = img_info[0]
             rects = page.get_image_rects(xref)
+            for r in rects:
+                # กรองภาพขนาดเล็กมากๆ เช่น เส้นประ, spacer
+                if r.width < 12 or r.height < 12:
+                    continue
+                # กรองภาพสแกนเอกสารทั้งหน้า (> 60% ของพื้นที่หน้ากระดาษ)
+                if page_area > 0 and ((r.width * r.height) / page_area) > 0.60:
+                    continue
+                raw_rects.append(r)
 
-            if rects:
-                for rect in rects:
-                    # ป้องกันการบันทึกภาพซ้ำซ้อนที่พิกัดเดียวกัน
-                    r_key = (round(rect.x0, 1), round(rect.y0, 1), round(rect.x1, 1), round(rect.y1, 1))
-                    if r_key in seen_rects:
-                        continue
-                    seen_rects.add(r_key)
+        # 2. รวมพิกัดรูปภาพที่ทับซ้อนหรือเป็นกราฟิกชิ้นเดียวกัน (Overlapping Graphic Merging)
+        # เช่น ไอคอนวงกลมตัวเลขสีแดงที่วางทับบนภาพกล่องพัสดุขั้นตอนที่ 1, 2, 3
+        merged_rects = []
+        for r in raw_rects:
+            found = False
+            for i, m in enumerate(merged_rects):
+                if m.intersects(r) or (abs(m.y1 - r.y0) < 10 and abs(m.x0 - r.x0) < 30):
+                    merged_rects[i] = m | r
+                    found = True
+                    break
+            if not found:
+                merged_rects.append(r)
 
-                    # กรองภาพขนาดเล็กมากๆ เช่น เส้นประ, ไอคอนตกแต่ง 1x1 หรือ spacer
-                    if rect.width < 15 or rect.height < 15:
-                        continue
+        # 3. จัดเรียงรูปภาพตามระดับสายตาจริง (Row Band Clustering) จากบนลงล่าง และจากซ้ายไปขวา
+        merged_rects.sort(key=lambda r: (round(r.y0 / 25.0), r.x0))
 
-                    # กรองภาพสแกนเอกสารทั้งหน้า (> 60% ของพื้นที่หน้ากระดาษ)
-                    img_area = rect.width * rect.height
-                    if page_area > 0 and (img_area / page_area) > 0.60:
-                        continue
+        # 4. สกัดภาพด้วย Pixmap ตามพิกัดที่รวมแล้ว เพื่อรักษา Alpha Mask และความคมชัด 100%
+        for idx, rect in enumerate(merged_rects, start=1):
+            try:
+                pix = page.get_pixmap(clip=rect, dpi=200)
+                img_bytes = pix.tobytes(output="png")
+                extracted.append(
+                    ExtractedImage(
+                        page_num=page_num,
+                        image_index=idx,
+                        image_bytes=img_bytes,
+                        ext="png",
+                        width=pix.width,
+                        height=pix.height,
+                        bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
+                    )
+                )
+            except Exception:
+                pass
 
-                    try:
-                        # เรนเดอร์ภาพจากหน้าเอกสารโดยตรงเพื่อรักษา Alpha Channel, Soft Mask และสีที่ถูกต้อง 100%
-                        # (แก้ปัญหารหัส QR Code หรือภาพโปร่งใสกลายเป็นกล่องดำทึบ)
-                        pix = page.get_pixmap(clip=rect, dpi=200)
-                        img_bytes = pix.tobytes(output="png")
-                        bbox = (rect.x0, rect.y0, rect.x1, rect.y1)
-
-                        extracted.append(
-                            ExtractedImage(
-                                page_num=page_num,
-                                image_index=len(extracted) + 1,
-                                image_bytes=img_bytes,
-                                ext="png",
-                                width=pix.width,
-                                height=pix.height,
-                                bbox=bbox,
-                            )
-                        )
-                    except Exception:
-                        # Fallback กรณีเรนเดอร์ล้มเหลว
-                        base_image = doc.extract_image(xref)
-                        extracted.append(
-                            ExtractedImage(
-                                page_num=page_num,
-                                image_index=len(extracted) + 1,
-                                image_bytes=base_image.get("image"),
-                                ext=base_image.get("ext", "png"),
-                                width=base_image.get("width", 0),
-                                height=base_image.get("height", 0),
-                                bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                            )
-                        )
-            else:
-                # กรณีไม่มี rect บนหน้า (ภาพที่ไม่ถูกวาดตรงๆ บนเลเยอร์หน้า)
+        # กรณีภาพที่ไม่ถูกวาดตรงๆ บนเลเยอร์หน้า (Fallback images without rects)
+        if not extracted:
+            for img_info in image_list:
+                xref = img_info[0]
                 base_image = doc.extract_image(xref)
                 width = base_image.get("width", 0)
                 height = base_image.get("height", 0)
@@ -245,18 +243,5 @@ class PDFProcessor:
                         bbox=None,
                     )
                 )
-
-        # จัดเรียงรูปภาพตามลำดับการอ่านจริงจากบนลงล่าง และจากซ้ายไปขวา (Row Band Clustering)
-        # ปัดเศษแกน Y เป็นแถวแนวนอน (Band ละ 25 pt) เพื่อให้ภาพที่อยู่ในระดับสายตาเดียวกัน เรียงจากซ้ายไปขวาเสมอ
-        extracted.sort(
-            key=lambda img: (
-                round(img.bbox[1] / 25.0) if img.bbox else 9999.0,
-                img.bbox[0] if img.bbox else 9999.0,
-            )
-        )
-
-        # รันหมายเลขลำดับรูปภาพใหม่ให้ตรงกับลำดับบนลงล่าง
-        for idx, img in enumerate(extracted, start=1):
-            img.image_index = idx
 
         return extracted
