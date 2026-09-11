@@ -94,12 +94,19 @@ class PDFToWordPipeline:
 
         self.fallback_events = []
 
+        def on_extractor_fallback(prev_model: str, next_model: str, reason: str):
+            self._handle_fallback(prev_model, next_model, reason)
+            if progress_callback:
+                progress_callback(
+                    1, total_pages, f"🔄 {prev_model} ({reason}) ➔ สลับไปใช้ {next_model}..."
+                )
+
         # 1. เตรียมโมดูลต่างๆ
         processor = PDFProcessor(input_file)
         extractor = GeminiExtractor(
             api_key=self.api_key,
             models=self.models,
-            on_fallback=self._handle_fallback,
+            on_fallback=on_extractor_fallback,
         )
 
         # 2. ตรวจจับฟอนต์จากเอกสารต้นฉบับ

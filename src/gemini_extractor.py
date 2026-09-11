@@ -163,7 +163,11 @@ class GeminiExtractor:
                     f"เกิดข้อผิดพลาดกับโมเดล {model_name} (หน้า {page_num + 1}): {err_str}"
                 )
 
-                # ตรวจสอบว่าเป็นข้อผิดพลาดด้านโควตา (429 / RESOURCE_EXHAUSTED) หรือ Rate limit
+                is_503_error = (
+                    "503" in err_str
+                    or "UNAVAILABLE" in err_str
+                    or "high demand" in err_str.lower()
+                )
                 is_quota_error = (
                     "429" in err_str
                     or "RESOURCE_EXHAUSTED" in err_str
@@ -171,14 +175,19 @@ class GeminiExtractor:
                     or "rate limit" in err_str.lower()
                 )
 
+                if is_503_error:
+                    reason = "เซิร์ฟเวอร์ติดคิวยาวชั่วคราว (503 High Demand)"
+                elif is_quota_error:
+                    reason = "โควตาเต็ม (429 Quota Exceeded)"
+                else:
+                    reason = f"ข้อผิดพลาด: {err_str[:60]}"
+
                 # สลับไปใช้โมเดลถัดไปใน fallback list
                 if len(self.models) > 1:
                     with self._lock:
                         prev_model = self.models[self.current_model_idx]
                         self.current_model_idx = (self.current_model_idx + 1) % len(self.models)
                         next_model = self.models[self.current_model_idx]
-
-                    reason = "โควตาเต็ม (429 Quota Exceeded)" if is_quota_error else f"ข้อผิดพลาด: {err_str[:80]}"
 
                     logger.warning(
                         f"🔄 ระบบสลับโมเดลอัตโนมัติ: {prev_model} ➔ {next_model} (สาเหตุ: {reason})"
@@ -190,8 +199,9 @@ class GeminiExtractor:
                         except Exception as cb_err:
                             logger.error(f"Error ใน callback on_fallback: {cb_err}")
 
-                    # พักสักครู่ก่อนลองโมเดลถัดไป
-                    time.sleep(1.0)
+                    # พักสักครู่ก่อนลองโมเดลถัดไป (สำหรับ 503 ให้รอ 2 วินาที)
+                    sleep_time = 2.0 if is_503_error else 1.0
+                    time.sleep(sleep_time)
                     continue
                 else:
                     # หากมีโมเดลเดียวและติดโควตา ให้รอสักครู่แล้วลองใหม่

@@ -413,6 +413,8 @@ class PDFDiggerApp(ctk.CTk):
     def _update_progress_ui(self, ratio: float, current: int, total: int, msg: str):
         self.progress_bar.set(ratio)
         self.status_label.configure(text=f"⏳ [{current}/{total}] {msg}", text_color="#2563EB")
+        if "สลับ" in msg or "🔄" in msg:
+            self.fallback_label.configure(text=msg)
 
     def _on_success(self, report):
         self.is_converting = False
