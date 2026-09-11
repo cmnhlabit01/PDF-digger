@@ -21,7 +21,7 @@ from .config import (
 from .pdf_processor import ExtractedImage
 
 
-def set_run_font(run, font_name: str = DEFAULT_FONT, size_pt: float = FONT_SIZE_BODY, bold: bool = False, italic: bool = False):
+def set_run_font(run, font_name: str = DEFAULT_FONT, size_pt: float = FONT_SIZE_BODY, bold: bool = False, italic: bool = False, color_rgb: Optional[RGBColor] = None):
     """
     กำหนดแบบอักษรให้รองรับภาษาไทยใน OpenXML อย่างสมบูรณ์
     โดยตั้งค่าทั้ง ascii, hAnsi และ cs (Complex Script) เพื่อให้เปิดบน Word ทุกเครื่องได้ฟอนต์ถูกต้อง
@@ -30,6 +30,8 @@ def set_run_font(run, font_name: str = DEFAULT_FONT, size_pt: float = FONT_SIZE_
     run.font.size = Pt(size_pt)
     run.bold = bold
     run.italic = italic
+    if color_rgb is not None:
+        run.font.color.rgb = color_rgb
 
     # กำหนดค่า XML element โดยตรงสำหรับ Complex Script (ภาษาไทย)
     rPr = run._r.get_or_add_rPr()
@@ -123,10 +125,18 @@ class DocxBuilder:
         is_small = False
         cleaned = raw_line.strip()
 
+        # ถอดรหัส HTML entities และลบแท็ก <hr>
+        cleaned = cleaned.replace("&nbsp;", " ")
+        cleaned = re.sub(r"</?hr\s*/?>", "", cleaned, flags=re.IGNORECASE).strip()
+
         # ตรวจสอบแท็กขนาดเล็ก
         if "[SMALL]" in cleaned.upper() or "[/SMALL]" in cleaned.upper():
             is_small = True
             cleaned = re.sub(r"\[/?SMALL\]", "", cleaned, flags=re.IGNORECASE).strip()
+
+        # ลบแท็ก [BADGE] หากมีในข้อความทั่วไป
+        if "[BADGE]" in cleaned.upper() or "[/BADGE]" in cleaned.upper():
+            cleaned = re.sub(r"\[/?BADGE\]", "", cleaned, flags=re.IGNORECASE).strip()
 
         # ตรวจสอบแท็กจัดตำแหน่ง
         if "[CENTER]" in cleaned.upper() or "[/CENTER]" in cleaned.upper():
@@ -269,7 +279,12 @@ class DocxBuilder:
                 p.alignment = alignment
                 if alignment == WD_ALIGN_PARAGRAPH.JUSTIFY:
                     p.paragraph_format.first_line_indent = Inches(0.4)
-            elif len(line) > 80 and not any(line.startswith(pfx) for pfx in ["ที่ ", "เรื่อง ", "เรียน ", "ถึง ", "จาก ", "วันที่ ", "เอกสาร "]):
+            elif (
+                len(line) > 80
+                and not any(pfx in line for pfx in [":", "：", "____", "  ", "\t", "|"])
+                and not any(line.startswith(pfx) for pfx in ["ที่ ", "เรื่อง ", "เรียน ", "ถึง ", "จาก ", "วันที่ ", "เอกสาร "])
+                and len(line.split()) >= 10
+            ):
                 p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 p.paragraph_format.first_line_indent = Inches(0.4)
 
@@ -284,10 +299,12 @@ class DocxBuilder:
         size_pt: Optional[float] = None,
         bold: bool = False,
         italic: bool = False,
+        color_rgb: Optional[RGBColor] = None,
     ):
-        """แยกแท็กตัวหนา (**ข้อความ**) และตัวเอียง (*ข้อความ*) ออกมาใส่ใน Run พร้อมกำหนดขนาด"""
+        """แยกแท็กตัวหนา (**ข้อความ**) และตัวเอียง (*ข้อความ*) ออกมาใส่ใน Run พร้อมกำหนดขนาดและสี"""
         from .gemini_extractor import clean_thai_ocr_text
         text = clean_thai_ocr_text(text)
+        text = re.sub(r"\[/?BADGE\]", "", text, flags=re.IGNORECASE)
         # ปรับทอนเส้นใต้ลายเซ็นที่ยาวเกินไป ไม่ให้ล้นและตกบรรทัด
         text = re.sub(r"_{20,}", "____________________", text)
         if "✂" in text:
@@ -300,13 +317,13 @@ class DocxBuilder:
                 continue
             if token.startswith("**") and token.endswith("**") and len(token) >= 4:
                 run = paragraph.add_run(token[2:-2])
-                set_run_font(run, self.font_name, actual_size, bold=True, italic=italic)
+                set_run_font(run, self.font_name, actual_size, bold=True, italic=italic, color_rgb=color_rgb)
             elif token.startswith("*") and token.endswith("*") and len(token) >= 2:
                 run = paragraph.add_run(token[1:-1])
-                set_run_font(run, self.font_name, actual_size, bold=bold, italic=True)
+                set_run_font(run, self.font_name, actual_size, bold=bold, italic=True, color_rgb=color_rgb)
             else:
                 run = paragraph.add_run(token)
-                set_run_font(run, self.font_name, actual_size, bold=bold, italic=italic)
+                set_run_font(run, self.font_name, actual_size, bold=bold, italic=italic, color_rgb=color_rgb)
 
     def _create_word_table(
         self,
@@ -360,7 +377,7 @@ class DocxBuilder:
         else:
             table.style = "Table Grid"
         # ขอบเซลล์แบบกะทัดรัด (Compact cell padding)
-        set_table_margins(table, top=60, bottom=60, left=100, right=100)
+        set_table_margins(table, top=40, bottom=40, left=80, right=80)
 
         # คำนวณความกว้างคอลัมน์แบบสัดส่วนตามเนื้อหาจริง (Smart Proportional Column Widths)
         total_page_width_in = 7.25
@@ -386,6 +403,24 @@ class DocxBuilder:
             if c_idx < len(col_widths):
                 col.width = Inches(col_widths[c_idx])
 
+        # ตรวจจับคอลัมน์ที่มีแถวว่างต่อเนื่อง (Auto-merge empty vertical cells)
+        # เช่น ฝั่งผู้รับ (TO) หรือบาร์โค้ดที่มีแถวย่อยหลายแถวในฝั่งขวา
+        merged_cells_coords = set()
+        for col in range(num_cols):
+            r = 0
+            while r < num_rows:
+                if parsed_rows[r][col].strip():
+                    start_r = r
+                    r += 1
+                    while r < num_rows and not parsed_rows[r][col].strip() and any(parsed_rows[r][c].strip() for c in range(num_cols)):
+                        r += 1
+                    if r - 1 > start_r:
+                        table.rows[start_r].cells[col].merge(table.rows[r - 1].cells[col])
+                        for mr in range(start_r + 1, r):
+                            merged_cells_coords.add((mr, col))
+                else:
+                    r += 1
+
         # คำนวณขนาดตัวอักษรสำหรับตารางให้กะทัดรัด พอดีกับช่องเอกสาร
         table_font_size = max(9.0, min(11.5, self.font_sizes["body"] - 4.5))
         header_font_size = max(10.0, min(12.5, self.font_sizes["body"] - 3.5))
@@ -404,6 +439,9 @@ class DocxBuilder:
                 trPr.append(parse_xml(f'<w:tblHeader {nsdecls("w")}/>'))
 
             for col_idx in range(num_cols):
+                if (row_idx, col_idx) in merged_cells_coords:
+                    continue
+
                 cell = row.cells[col_idx]
                 if col_idx < len(col_widths):
                     cell.width = Inches(col_widths[col_idx])
@@ -411,6 +449,10 @@ class DocxBuilder:
 
                 raw_cell_content = row_data[col_idx] if col_idx < len(row_data) else ""
                 cell.text = ""  # เคลียร์พารากราฟเริ่มต้น
+
+                # แทนที่ &nbsp; และแปลง <hr> เป็น <br>
+                raw_cell_content = raw_cell_content.replace("&nbsp;", " ")
+                raw_cell_content = re.sub(r"</?hr\s*/?>", "<br>", raw_cell_content, flags=re.IGNORECASE)
 
                 # แยกหลายบรรทัดในเซลล์ด้วย <br> หรือ \n
                 cell_lines = re.split(r"<br\s*/?>|\n", raw_cell_content, flags=re.IGNORECASE)
@@ -435,15 +477,47 @@ class DocxBuilder:
 
                     # ตรวจสอบแท็กรูปภาพ [IMAGE] ในเซลล์ตาราง (เช่น บาร์โค้ดหรือโลโก้)
                     if "[IMAGE]" in line_str.upper():
+                        remaining_text = re.sub(r"\[IMAGE\]", "", line_str, flags=re.IGNORECASE).strip()
                         if images_queue:
                             img = images_queue.pop(0)
                             self._insert_image_to_paragraph(p, img, max_width_inches=3.0)
-                        continue
+                        if remaining_text:
+                            # มีข้อความอื่นอยู่ในบรรทัดเดียวกับ [IMAGE] เช่น [BADGE]PICK UP[/BADGE]
+                            line_str = remaining_text
+                            p = cell.add_paragraph()
+                            p.paragraph_format.space_before = Pt(0.5)
+                            p.paragraph_format.space_after = Pt(0.5)
+                            p.paragraph_format.line_spacing = 1.0
+                        else:
+                            continue
+
+                    # ตรวจสอบป้ายกำกับ [BADGE]
+                    is_badge = False
+                    if "[BADGE]" in line_str.upper():
+                        is_badge = True
+                        line_str = re.sub(r"\[/?BADGE\]", "", line_str, flags=re.IGNORECASE).strip()
 
                     # แยกแท็กจัดตำแหน่ง [CENTER], [RIGHT], [SMALL]
                     clean_text, align, is_small = self.parse_line_formatting(line_str)
 
-                    if is_small:
+                    # ตรวจจับป้ายกำกับแบบฟอร์มที่เป็นสัญลักษณ์ทึบอัตโนมัติ (เช่น W, RR, PICK UP, COD)
+                    if clean_text.strip().upper() in ["W", "RR", "PICK UP", "COD"]:
+                        is_badge = True
+
+                    # ตรวจสอบหัวข้อในเซลล์ (เช่น # W_0_A2_227_HBKAE-B หรือ -# I17)
+                    is_cell_heading = False
+                    cell_heading_match = re.match(r"^[-*]?\s*(#{1,3})\s+(.*)$", clean_text)
+                    if cell_heading_match:
+                        h_level = len(cell_heading_match.group(1))
+                        clean_text = cell_heading_match.group(2).strip()
+                        is_cell_heading = True
+                        if h_level == 1:
+                            curr_size = 20.0
+                        elif h_level == 2:
+                            curr_size = 15.0
+                        else:
+                            curr_size = 13.0
+                    elif is_small:
                         curr_size = self.font_sizes["small"]
                     elif is_header:
                         curr_size = header_font_size
@@ -453,29 +527,51 @@ class DocxBuilder:
                     # กำหนดการจัดตำแหน่งในเซลล์
                     if align:
                         p.alignment = align
-                    elif is_header:
+                    elif is_header or is_badge or is_cell_heading:
                         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     elif re.match(r"^[\$฿€¥]?\s*[\d,]+(\.\d+)?%?$", clean_text):
                         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                     else:
                         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-                    if is_header:
+                    if is_badge:
+                        has_cell_img = any("[IMAGE]" in cl.upper() for cl in cell_lines) or "[IMAGE]" in raw_cell_content.upper()
+                        if not has_cell_img:
+                            set_cell_background(cell, "595959")
+                            self._add_formatted_text_to_paragraph(p, clean_text, size_pt=max(curr_size, 11.5), bold=True, color_rgb=RGBColor(255, 255, 255))
+                        else:
+                            self._add_formatted_text_to_paragraph(p, clean_text, size_pt=max(curr_size, 11.5), bold=True)
+                    elif is_header:
                         set_cell_background(cell, "F2F2F2")
+                        self._add_formatted_text_to_paragraph(p, clean_text, size_pt=curr_size, bold=True)
+                    elif is_cell_heading:
                         self._add_formatted_text_to_paragraph(p, clean_text, size_pt=curr_size, bold=True)
                     else:
                         self._add_formatted_text_to_paragraph(p, clean_text, size_pt=curr_size)
 
+        # เพิ่ม Paragraph คั่นตารางขนาด 1 pt ป้องกันไม่ให้ Microsoft Word หลอมรวมตารางที่อยู่ติดกันเป็นตารางเดียว
+        sep_p = self.doc.add_paragraph()
+        sep_p.paragraph_format.space_before = Pt(0)
+        sep_p.paragraph_format.space_after = Pt(0)
+        sep_p.paragraph_format.line_spacing = Pt(1)
+        run = sep_p.add_run()
+        run.font.size = Pt(1)
 
     def _insert_image_to_paragraph(self, p, img: ExtractedImage, max_width_inches: float = 6.0):
-        """แทรกรูปภาพลงใน Paragraph ที่ระบุ พร้อมจำกัดความกว้างสูงสุด"""
+        """แทรกรูปภาพลงใน Paragraph ที่ระบุ พร้อมจำกัดความกว้างและความสูงไม่ให้ล้นตาราง"""
         try:
             image_stream = io.BytesIO(img.image_bytes)
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = p.add_run()
             if img.bbox and len(img.bbox) == 4:
                 bbox_w_pt = abs(img.bbox[2] - img.bbox[0])
+                bbox_h_pt = abs(img.bbox[3] - img.bbox[1])
                 width_in_inches = min(bbox_w_pt / 72.0, max_width_inches)
+                # ควบคุมความสูงสูงสุดในช่องตารางไม่ให้เกิน 1.05 นิ้ว เพื่อประหยัดพื้นที่แนวตั้ง
+                if bbox_w_pt > 0:
+                    est_height = (bbox_h_pt / bbox_w_pt) * width_in_inches
+                    if est_height > 1.05:
+                        width_in_inches = (1.05 / est_height) * width_in_inches
                 width_in_inches = max(0.4, width_in_inches)
             else:
                 width_in_inches = min(img.width / 150.0, max_width_inches)

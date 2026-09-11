@@ -499,6 +499,66 @@ class TestPDFDigger(unittest.TestCase):
 
         print("✅ ทดสอบ Thai OCR Cleaner, Row Band Image Sorting & Signature Line Trimming สำเร็จ")
 
+    def test_table_merging_badges_and_headings(self):
+        """ทดสอบการผสานเซลล์ตารางแนวตั้ง ป้ายกำกับ [BADGE] หัวข้อในตาราง และการแยกตารางที่อยู่ติดกัน"""
+        builder = DocxBuilder(font_name="Cordia New")
+
+        md_content = (
+            "| [BADGE]PICK UP[/BADGE] | [CENTER]**SPX**[/CENTER] |\n"
+            "|---|---|\n\n"
+            "| **ผู้รับ (TO)** | # **I17-(PET.5)** |\n"
+            "|---|---|\n"
+            "| | [CENTER]**-**[/CENTER] |\n"
+            "| | [CENTER]**RR-MP**[/CENTER] |\n"
+            "| **บาร์โค้ด** | [BADGE]W[/BADGE] |\n"
+            "| | [CENTER]# **10**[/CENTER] |\n\n"
+            "Original Order No: 260906BRSPB0KA &nbsp;&nbsp;&nbsp;&nbsp; Pickup Date: 11-09-2026\n"
+        )
+
+        builder.add_page_content(
+            markdown_text=md_content,
+            page_num=1,
+            is_first_page=True,
+        )
+
+        out_path = self.test_dir / "test_badges_tables.docx"
+        builder.save(out_path)
+        self.assertTrue(out_path.exists())
+
+        doc = docx.Document(str(out_path))
+        # 1. ตรวจสอบว่าตารางทั้งสองไม่ถูกหลอมรวมกัน (มี 2 ตารางแยกกัน)
+        self.assertEqual(len(doc.tables), 2)
+
+        # 2. ตรวจสอบป้ายกำกับ PICK UP ในตารางที่ 1 (มีพื้นหลังทึบ 595959 และสีตัวอักษรขาว FFFFFF)
+        tbl1 = doc.tables[0]
+        cell_pickup = tbl1.rows[0].cells[0]
+        self.assertIn('w:fill="595959"', cell_pickup._tc.xml)
+        self.assertIn('w:color w:val="FFFFFF"', cell_pickup._tc.xml)
+        self.assertIn("PICK UP", cell_pickup.text)
+
+        # 3. ตรวจสอบการผสานเซลล์แนวตั้งในตารางที่ 2: ผู้รับ (TO) ควบแถว 0, 1, 2
+        tbl2 = doc.tables[1]
+        # เซลล์แถว 0 และแถว 1 ในคอลัมน์ 0 ต้องเป็นเซลล์เดียวกันหลังการ merge
+        self.assertEqual(tbl2.rows[0].cells[0].text.strip(), tbl2.rows[1].cells[0].text.strip())
+
+        # 4. ตรวจสอบหัวข้อขนาดใหญ่ในเซลล์ (# I17-(PET.5)) ต้องมีขนาดอย่างน้อย 20pt
+        cell_i17 = tbl2.rows[0].cells[1]
+        run_i17 = [r for r in cell_i17.paragraphs[0].runs if r.text][0]
+        self.assertGreaterEqual(run_i17.font.size.pt, 20.0)
+
+        # 5. ตรวจสอบป้ายกำกับ W ในตารางที่ 2 (แถวที่ 3)
+        cell_w = tbl2.rows[3].cells[1]
+        self.assertIn('w:fill="595959"', cell_w._tc.xml)
+        self.assertIn('w:color w:val="FFFFFF"', cell_w._tc.xml)
+
+        # 6. ตรวจสอบข้อความ receipt ว่าไม่มี &nbsp; หลุดออกมา
+        p_receipt = [p for p in doc.paragraphs if "Original Order No" in p.text][0]
+        self.assertNotIn("&nbsp;", p_receipt.text)
+        self.assertIn("Original Order No: 260906BRSPB0KA", p_receipt.text)
+        self.assertIn("Pickup Date: 11-09-2026", p_receipt.text)
+
+        print("✅ ทดสอบ Table Vertical Merging, Badges, Cell Headings & Entity Decoding สำเร็จ")
+
 
 if __name__ == "__main__":
     unittest.main()
