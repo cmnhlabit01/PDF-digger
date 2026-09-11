@@ -168,15 +168,7 @@ class DocxBuilder:
                 i += 1
                 continue
 
-            # 2. ตรวจสอบแท็กรูปภาพ [IMAGE]
-            if "[IMAGE]" in raw_line.upper():
-                if images_queue:
-                    img = images_queue.pop(0)
-                    self._insert_image(img)
-                i += 1
-                continue
-
-            # ตรวจสอบแท็กตารางไร้ขอบ [BORDERLESS]
+            # 2. ตรวจสอบตาราง (Markdown Table) และแท็ก [BORDERLESS]
             is_borderless_table = False
             if "[BORDERLESS]" in raw_line.upper() or "[NO_BORDER]" in raw_line.upper():
                 is_borderless_table = True
@@ -184,13 +176,20 @@ class DocxBuilder:
                 if i < len(lines):
                     raw_line = lines[i].strip()
 
-            # 3. ตรวจสอบตาราง (Markdown Table)
             if raw_line.startswith("|") and ("|" in raw_line[1:]):
                 table_lines = []
                 while i < len(lines) and lines[i].strip().startswith("|") and ("|" in lines[i].strip()[1:]):
                     table_lines.append(lines[i].strip())
                     i += 1
                 self._create_word_table(table_lines, images_queue=images_queue, is_borderless=is_borderless_table)
+                continue
+
+            # 3. ตรวจสอบแท็กรูปภาพเดี่ยว [IMAGE] (ที่ไม่ได้อยู่ในตาราง)
+            if "[IMAGE]" in raw_line.upper():
+                if images_queue:
+                    img = images_queue.pop(0)
+                    self._insert_image(img)
+                i += 1
                 continue
 
             # ตรวจสอบและแยกแท็กจัดตำแหน่งและขนาดก่อน
@@ -349,6 +348,11 @@ class DocxBuilder:
         num_cols = max(len(r) for r in parsed_rows)
         num_rows = len(parsed_rows)
 
+        # ตรวจสอบว่าเป็นตารางส่วนหัวแบบไร้ขอบโดยอัตโนมัติหรือไม่
+        if not is_borderless:
+            if len(parsed_rows) == 1 and any("PICK UP" in c.upper() or "SPX" in c.upper() for c in parsed_rows[0]):
+                is_borderless = True
+
         table = self.doc.add_table(rows=num_rows, cols=num_cols)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         if is_borderless:
@@ -357,6 +361,30 @@ class DocxBuilder:
             table.style = "Table Grid"
         # ขอบเซลล์แบบกะทัดรัด (Compact cell padding)
         set_table_margins(table, top=60, bottom=60, left=100, right=100)
+
+        # คำนวณความกว้างคอลัมน์แบบสัดส่วนตามเนื้อหาจริง (Smart Proportional Column Widths)
+        total_page_width_in = 7.25
+        col_weights = []
+        for col_idx in range(num_cols):
+            col_cells = [r[col_idx] for r in parsed_rows if col_idx < len(r)]
+            max_len = max((len(c) for c in col_cells), default=1)
+            has_img = any("[IMAGE]" in c.upper() for c in col_cells)
+            if has_img:
+                weight = max(30.0, min(float(max_len), 70.0))
+            else:
+                weight = max(12.0, min(float(max_len), 150.0))
+            col_weights.append(weight)
+
+        total_weight = sum(col_weights) if sum(col_weights) > 0 else 1.0
+        col_widths = [(w / total_weight) * total_page_width_in for w in col_weights]
+        col_widths = [max(0.8, w) for w in col_widths]
+        total_w = sum(col_widths)
+        col_widths = [(w / total_w) * total_page_width_in for w in col_widths]
+
+        table.autofit = False
+        for c_idx, col in enumerate(table.columns):
+            if c_idx < len(col_widths):
+                col.width = Inches(col_widths[c_idx])
 
         # คำนวณขนาดตัวอักษรสำหรับตารางให้กะทัดรัด พอดีกับช่องเอกสาร
         table_font_size = max(9.0, self.font_sizes["body"] - 3.0)
@@ -376,6 +404,8 @@ class DocxBuilder:
 
             for col_idx in range(num_cols):
                 cell = row.cells[col_idx]
+                if col_idx < len(col_widths):
+                    cell.width = Inches(col_widths[col_idx])
                 cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
                 raw_cell_content = row_data[col_idx] if col_idx < len(row_data) else ""

@@ -12,19 +12,34 @@ FONT_MAPPINGS = [
     (r"cordia", "Cordia New"),
     (r"angsana", "Angsana New"),
     (r"browallia", "Browallia New"),
+    (r"waree", "Cordia New"),
+    (r"loma", "Cordia New"),
+    (r"garuda", "TH Sarabun New"),
+    (r"kinnari", "TH Sarabun New"),
+    (r"norasi", "TH Sarabun New"),
+    (r"umpush", "TH Sarabun New"),
+    (r"laksaman", "TH Sarabun New"),
+    (r"tlwg", "TH Sarabun New"),
     (r"tahoma", "Tahoma"),
     (r"calibri", "Calibri"),
     (r"arial", "Arial"),
+    (r"liberation(sans)?", "Arial"),
+    (r"liberationserif", "Times New Roman"),
     (r"times(newroman)?", "Times New Roman"),
     (r"segoe", "Segoe UI"),
-    (r"garuda", "Garuda"),
-    (r"kinnari", "Kinnari"),
     (r"sukhumvit", "Sukhumvit Set"),
     (r"helvetica", "Arial"),
     (r"cambria", "Cambria"),
     (r"georgia", "Georgia"),
     (r"verdana", "Verdana"),
 ]
+
+# รายชื่อฟอนต์สากลที่ปลอดภัยสำหรับการเปิดบน Word ทุกระบบปฏิบัติการ (macOS & Windows)
+SAFE_OFFICE_FONTS = {
+    "th sarabun new", "cordia new", "angsana new", "browallia new",
+    "tahoma", "calibri", "arial", "times new roman", "segoe ui",
+    "sukhumvit set", "cambria", "georgia", "verdana"
+}
 
 
 def clean_font_name(raw_name: str) -> str:
@@ -33,6 +48,7 @@ def clean_font_name(raw_name: str) -> str:
     - 'ABCDEF+THSarabunPSK-Bold' -> 'TH Sarabun New'
     - 'CordiaNew-Regular' -> 'Cordia New'
     - 'AngsanaUPC,Bold' -> 'Angsana New'
+    - 'Waree' -> 'Cordia New' (Linux font mapping)
     """
     if not raw_name:
         return DEFAULT_FONT
@@ -54,8 +70,12 @@ def clean_font_name(raw_name: str) -> str:
         if re.search(pattern, name_lower):
             return official_name
 
-    # หากไม่ตรงกับรายการมาตรฐาน ให้คืนค่าชื่อที่ตัดแต่งแล้ว หรือค่าเริ่มต้น
-    return name_clean if len(name_clean) >= 3 else DEFAULT_FONT
+    # หากไม่ตรงกับรายการมาตรฐาน ให้ตรวจสอบว่าเป็นฟอนต์สากลที่ปลอดภัยหรือไม่
+    if name_clean.lower() in SAFE_OFFICE_FONTS:
+        return name_clean
+
+    # หากเป็นฟอนต์เฉพาะทางหรือ Linux font ที่ไม่มีบนเครื่องผู้ใช้ ให้ fallback เป็น DEFAULT_FONT
+    return DEFAULT_FONT
 
 
 def detect_dominant_font(pdf_path: str | Path, max_pages_to_check: int = 5) -> Optional[str]:
