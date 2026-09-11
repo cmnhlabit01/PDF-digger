@@ -263,6 +263,13 @@ class DocxBuilder:
         italic: bool = False,
     ):
         """แยกแท็กตัวหนา (**ข้อความ**) และตัวเอียง (*ข้อความ*) ออกมาใส่ใน Run พร้อมกำหนดขนาด"""
+        from .gemini_extractor import clean_thai_ocr_text
+        text = clean_thai_ocr_text(text)
+        # ปรับทอนเส้นใต้ลายเซ็นที่ยาวเกินไป ไม่ให้ล้นและตกบรรทัด
+        text = re.sub(r"_{20,}", "____________________", text)
+        if "✂" in text:
+            text = re.sub(r"[-–—_]{30,}", "--------------------------------------------------", text)
+
         actual_size = size_pt if size_pt is not None else self.font_sizes["body"]
         tokens = re.split(r"(\*\*.*?\*\*|\*.*?\*)", text)
         for token in tokens:
@@ -391,10 +398,6 @@ class DocxBuilder:
                     else:
                         self._add_formatted_text_to_paragraph(p, clean_text, size_pt=curr_size)
 
-        # เพิ่มวรรคหลังตารางแบบกะทัดรัด
-        p_after = self.doc.add_paragraph()
-        p_after.paragraph_format.space_before = Pt(2)
-        p_after.paragraph_format.space_after = Pt(2)
 
     def _insert_image_to_paragraph(self, p, img: ExtractedImage, max_width_inches: float = 6.0):
         """แทรกรูปภาพลงใน Paragraph ที่ระบุ พร้อมจำกัดความกว้างสูงสุด"""

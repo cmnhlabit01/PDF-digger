@@ -408,10 +408,11 @@ class TestPDFDigger(unittest.TestCase):
 
     def test_thai_ocr_cleaner_and_image_sorting(self):
         """ทดสอบฟังก์ชันแก้คำผิดวรรณยุกต์ไทย และการจัดเรียงรูปภาพตามพิกัดสายตา (y0, x0)"""
-        # 1. ทดสอบการทำความสะอาดวรรณยุกต์ไทย
+        # 1. ทดสอบการทำความสะอาดวรรณยุกต์ไทยและคำผิดในแบบฟอร์ม
         raw_typos = (
             "กฤต อยู่ชั2น 3 วันที2 11 ขั#นตอนการส่งคืน เพืLอความรวดเร็ว ช้อปปี2 "
-            "เพิ2มเติม สิ3นสุด และไม่ตอ้งเกบ็ เงิน"
+            "เพิ2มเติม สิ3นสุด และไม่ตอ้งเกบ็ เงิน พันกงานผู้รับสินค้า จังหัวดเชียงใหม่ "
+            "หัลกฐาน ขั(นตอน นีE สิEนสุด ชื@อ"
         )
         cleaned = clean_thai_ocr_text(raw_typos)
         self.assertIn("ชั้น 3", cleaned)
@@ -422,35 +423,64 @@ class TestPDFDigger(unittest.TestCase):
         self.assertIn("เพิ่มเติม", cleaned)
         self.assertIn("สิ้นสุด", cleaned)
         self.assertIn("ไม่ต้องเก็บ เงิน", cleaned)
+        self.assertIn("พนักงานผู้รับสินค้า", cleaned)
+        self.assertIn("จังหวัดเชียงใหม่", cleaned)
+        self.assertIn("หลักฐาน", cleaned)
+        self.assertIn("ขั้นตอน", cleaned)
+        self.assertIn("นี้", cleaned)
+        self.assertIn("ชื่อ", cleaned)
 
-        # 2. ทดสอบการจัดเรียงรูปภาพตามพิกัด (y0, x0) ใน PDFProcessor
+        # 2. ทดสอบการจัดเรียงรูปภาพแบบ Row Band Clustering (y0 ใกล้เคียงกัน ต้องเรียงจากซ้ายไปขวา x0)
         test_pdf = self.test_dir / "test_sort_images.pdf"
         doc = fitz.open()
         page = doc.new_page(width=595, height=842)
 
-        # สร้างภาพ 2 รูป: ใส่รูปล่างก่อน (y=500), แล้วใส่รูปบน (y=50)
+        # สร้างภาพ 3 รูป:
+        # รูปขวาบน (y=6.7, x=273.5) เช่น บาร์โค้ด
+        # รูปซ้ายบน (y=9.7, x=18.7) เช่น โลโก้
+        # รูปล่าง (y=500, x=50)
         img_buf = io.BytesIO()
         Image.new("RGB", (50, 50), color="blue").save(img_buf, format="PNG")
-        page.insert_image(fitz.Rect(50, 500, 100, 550), stream=img_buf.getvalue())  # รูปล่าง
-        page.insert_image(fitz.Rect(50, 50, 100, 100), stream=img_buf.getvalue())    # รูปบน
+        page.insert_image(fitz.Rect(273.5, 6.7, 500.0, 50.0), stream=img_buf.getvalue())  # ขวาบน (y เล็กกว่าเล็กน้อย)
+        page.insert_image(fitz.Rect(18.7, 9.7, 150.0, 50.0), stream=img_buf.getvalue())   # ซ้ายบน (y มากกว่าเล็กน้อยแต่อยู่แถวเดียวกัน)
+        page.insert_image(fitz.Rect(50.0, 500.0, 100.0, 550.0), stream=img_buf.getvalue()) # รูปล่าง
         doc.save(str(test_pdf))
         doc.close()
 
         proc = PDFProcessor(test_pdf)
         pdata = proc.process_page(0)
 
-        # ตรวจสอบว่ารูปภาพถูกจัดเรียงจากบนลงล่าง (รูปแรกต้องมี y0 อยู่แถว 50, รูปสอง y0 อยู่แถว 500)
-        self.assertEqual(len(pdata.embedded_images), 2)
-        first_img = pdata.embedded_images[0]
-        second_img = pdata.embedded_images[1]
+        # ตรวจสอบว่ารูปภาพในแถวบน โลโก้ซ้าย (x=18.7) ต้องมาก่อน บาร์โค้ดขวา (x=273.5) แม้ y บาร์โค้ดจะเริ่มก่อนเล็กน้อย
+        self.assertEqual(len(pdata.embedded_images), 3)
+        img_top_left = pdata.embedded_images[0]
+        img_top_right = pdata.embedded_images[1]
+        img_bottom = pdata.embedded_images[2]
 
-        self.assertIsNotNone(first_img.bbox)
-        self.assertIsNotNone(second_img.bbox)
-        self.assertLess(first_img.bbox[1], second_img.bbox[1])
-        self.assertEqual(first_img.image_index, 1)
-        self.assertEqual(second_img.image_index, 2)
+        self.assertLess(img_top_left.bbox[0], img_top_right.bbox[0])
+        self.assertAlmostEqual(img_top_left.bbox[0], 18.7, delta=1.0)
+        self.assertAlmostEqual(img_top_right.bbox[0], 273.5, delta=1.0)
+        self.assertGreater(img_bottom.bbox[1], 400.0)
 
-        print("✅ ทดสอบ Thai OCR Cleaner & Image Spatial Sorting (y0, x0) สำเร็จ")
+        self.assertEqual(img_top_left.image_index, 1)
+        self.assertEqual(img_top_right.image_index, 2)
+        self.assertEqual(img_bottom.image_index, 3)
+
+        # 3. ทดสอบการตัดทอนเส้นใต้ลายเซ็นที่ยาวเกินไปใน DocxBuilder
+        builder = DocxBuilder()
+        builder.add_page_content(
+            "ชื่อผู้ส่ง: __________________________________________________\n"
+            "✂---------------------------------------------------------------------------------------------------",
+            page_num=1,
+            is_first_page=True,
+        )
+        p_sig = builder.doc.paragraphs[0]
+        self.assertNotIn("__________________________________________________", p_sig.text)
+        self.assertIn("____________________", p_sig.text)
+
+        p_cut = builder.doc.paragraphs[1]
+        self.assertLess(len(p_cut.text), 70)
+
+        print("✅ ทดสอบ Thai OCR Cleaner, Row Band Image Sorting & Signature Line Trimming สำเร็จ")
 
 
 if __name__ == "__main__":

@@ -246,10 +246,11 @@ class PDFProcessor:
                     )
                 )
 
-        # จัดเรียงรูปภาพตามลำดับการอ่านจริงจากบนลงล่าง และจากซ้ายไปขวา (y0, x0)
+        # จัดเรียงรูปภาพตามลำดับการอ่านจริงจากบนลงล่าง และจากซ้ายไปขวา (Row Band Clustering)
+        # ปัดเศษแกน Y เป็นแถวแนวนอน (Band ละ 25 pt) เพื่อให้ภาพที่อยู่ในระดับสายตาเดียวกัน เรียงจากซ้ายไปขวาเสมอ
         extracted.sort(
             key=lambda img: (
-                img.bbox[1] if img.bbox else 9999.0,
+                round(img.bbox[1] / 25.0) if img.bbox else 9999.0,
                 img.bbox[0] if img.bbox else 9999.0,
             )
         )
