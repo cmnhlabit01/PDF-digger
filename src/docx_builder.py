@@ -66,6 +66,22 @@ def set_table_margins(table, top: int = 100, bottom: int = 100, left: int = 150,
     tblPr.append(tblCellMar)
 
 
+def set_table_borderless(table):
+    """ลบเส้นขอบตารางออกทั้งหมด สำหรับตารางจัดเค้าโครงหน้า (Layout Table ไร้ขอบ)"""
+    tblPr = table._tbl.tblPr
+    tblBorders = parse_xml(
+        f'<w:tblBorders {nsdecls("w")}>'
+        f'  <w:top w:val="none"/>'
+        f'  <w:left w:val="none"/>'
+        f'  <w:bottom w:val="none"/>'
+        f'  <w:right w:val="none"/>'
+        f'  <w:insideH w:val="none"/>'
+        f'  <w:insideV w:val="none"/>'
+        f'</w:tblBorders>'
+    )
+    tblPr.append(tblBorders)
+
+
 class DocxBuilder:
     """คลาสสร้างเอกสาร Word (.docx) จาก Markdown ที่ได้จาก Gemini พร้อมแทรกตาราง รูปภาพ และการจัดหน้าตามต้นฉบับ"""
 
@@ -160,13 +176,21 @@ class DocxBuilder:
                 i += 1
                 continue
 
+            # ตรวจสอบแท็กตารางไร้ขอบ [BORDERLESS]
+            is_borderless_table = False
+            if "[BORDERLESS]" in raw_line.upper() or "[NO_BORDER]" in raw_line.upper():
+                is_borderless_table = True
+                i += 1
+                if i < len(lines):
+                    raw_line = lines[i].strip()
+
             # 3. ตรวจสอบตาราง (Markdown Table)
             if raw_line.startswith("|") and ("|" in raw_line[1:]):
                 table_lines = []
                 while i < len(lines) and lines[i].strip().startswith("|") and ("|" in lines[i].strip()[1:]):
                     table_lines.append(lines[i].strip())
                     i += 1
-                self._create_word_table(table_lines, images_queue=images_queue)
+                self._create_word_table(table_lines, images_queue=images_queue, is_borderless=is_borderless_table)
                 continue
 
             # ตรวจสอบและแยกแท็กจัดตำแหน่งและขนาดก่อน
@@ -285,13 +309,23 @@ class DocxBuilder:
                 run = paragraph.add_run(token)
                 set_run_font(run, self.font_name, actual_size, bold=bold, italic=italic)
 
-    def _create_word_table(self, table_lines: List[str], images_queue: Optional[List[ExtractedImage]] = None):
+    def _create_word_table(
+        self,
+        table_lines: List[str],
+        images_queue: Optional[List[ExtractedImage]] = None,
+        is_borderless: bool = False,
+    ):
         """แปลงตาราง Markdown เป็น Table Object ของ Word พร้อมจัดขอบตาราง ถอดรหัสแท็ก และแทรกรูปในเซลล์"""
         if not table_lines:
             return
 
         parsed_rows = []
         for line in table_lines:
+            # ตรวจสอบแท็ก [BORDERLESS] ในบรรทัดตาราง
+            if "[BORDERLESS]" in line.upper() or "[NO_BORDER]" in line.upper():
+                is_borderless = True
+                continue
+
             # ตัด | ตัวแรกและตัวสุดท้ายออก
             content = line.strip()
             if content.startswith("|"):
@@ -317,7 +351,10 @@ class DocxBuilder:
 
         table = self.doc.add_table(rows=num_rows, cols=num_cols)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        table.style = "Table Grid"
+        if is_borderless:
+            set_table_borderless(table)
+        else:
+            table.style = "Table Grid"
         # ขอบเซลล์แบบกะทัดรัด (Compact cell padding)
         set_table_margins(table, top=60, bottom=60, left=100, right=100)
 

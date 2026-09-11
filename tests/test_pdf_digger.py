@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import docx
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 import pymupdf as fitz
 from PIL import Image
 
@@ -404,7 +405,23 @@ class TestPDFDigger(unittest.TestCase):
         code_p = [p for p in right_cell.paragraphs if "TH2608793615733" in p.text][0]
         self.assertEqual(code_p.alignment, WD_ALIGN_PARAGRAPH.CENTER)
 
-        print("✅ ทดสอบ Table Cell Formatting (<br>, [CENTER], Bold, [IMAGE]) สำเร็จ")
+        # ทดสอบการสร้างตารางไร้ขอบ [BORDERLESS]
+        builder_bl = DocxBuilder()
+        builder_bl.add_page_content(
+            "[BORDERLESS]\n"
+            "| [IMAGE] | **TH2608793615733** |\n"
+            "|---|---|\n",
+            page_num=1,
+            is_first_page=True,
+        )
+        self.assertEqual(len(builder_bl.doc.tables), 1)
+        bl_tbl = builder_bl.doc.tables[0]
+        # ตรวจสอบว่ามี element w:tblBorders อยู่ใน tblPr
+        tblPr = bl_tbl._tbl.tblPr
+        tblBorders = tblPr.find(qn("w:tblBorders"))
+        self.assertIsNotNone(tblBorders)
+
+        print("✅ ทดสอบ Table Cell Formatting (<br>, [CENTER], Bold, [IMAGE], [BORDERLESS]) สำเร็จ")
 
     def test_thai_ocr_cleaner_and_image_sorting(self):
         """ทดสอบฟังก์ชันแก้คำผิดวรรณยุกต์ไทย และการจัดเรียงรูปภาพตามพิกัดสายตา (y0, x0)"""
