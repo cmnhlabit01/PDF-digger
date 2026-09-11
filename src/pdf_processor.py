@@ -160,54 +160,102 @@ class PDFProcessor:
     def _extract_images_from_page(
         self, doc: fitz.Document, page: fitz.Page, page_num: int
     ) -> List[ExtractedImage]:
-        """สกัดรูปภาพประกอบจากหน้า PDF โดยกรองรูปขนาดเล็กหรือไอคอนออก"""
+        """
+        สกัดรูปภาพประกอบจากหน้า PDF โดย:
+        - เรนเดอร์ด้วย page.get_pixmap(clip=rect) เพื่อให้ได้สีและ Alpha/Soft Mask ที่ถูกต้อง ป้องกันปัญหากล่องดำ QR Code
+        - กรองรูปสแกนทั้งหน้า (> 60% ของพื้นที่) และสเปเซอร์ขนาดจิ๋วออก
+        - จัดเรียงรูปภาพตามพิกัดสายตาจริงจากบนลงล่าง และจากซ้ายไปขวา (y0, x0)
+        """
         extracted = []
         image_list = page.get_images(full=True)
+        seen_rects = set()
+        page_area = page.rect.width * page.rect.height
 
-        for img_idx, img_info in enumerate(image_list):
+        for img_info in image_list:
             xref = img_info[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image.get("image")
-            image_ext = base_image.get("ext", "png")
-            width = base_image.get("width", 0)
-            height = base_image.get("height", 0)
-
-            # กรองภาพขนาดเล็กมากๆ เช่น เส้นประ, ไอคอนตกแต่ง, หรือ 1x1 spacer
-            if width < 60 or height < 60:
-                continue
-
-            # ค้นหาตำแหน่ง Bounding Box ของรูปภาพในหน้าถ้ามี
-            bbox = None
-            is_full_page_scan = False
-            page_area = page.rect.width * page.rect.height
-
             rects = page.get_image_rects(xref)
-            for rect in rects:
-                bbox = (rect.x0, rect.y0, rect.x1, rect.y1)
-                img_area = rect.width * rect.height
-                # หากภาพครอบคลุมพื้นที่หน้ากระดาษเกิน 60% แสดงว่าเป็นภาพสแกนเอกสารทั้งหน้า
-                if page_area > 0 and (img_area / page_area) > 0.60:
-                    is_full_page_scan = True
-                break
 
-            # กรณีไม่มี rect ชัดเจน หรือภาพครอบคลุมทั้งหน้า
-            if is_full_page_scan:
-                continue
+            if rects:
+                for rect in rects:
+                    # ป้องกันการบันทึกภาพซ้ำซ้อนที่พิกัดเดียวกัน
+                    r_key = (round(rect.x0, 1), round(rect.y0, 1), round(rect.x1, 1), round(rect.y1, 1))
+                    if r_key in seen_rects:
+                        continue
+                    seen_rects.add(r_key)
 
-            # หากทั้งหน้านี้มีรูปเดียวและครอบคลุมทั้งหน้ากระดาษ (ภาพสแกนทั้งหน้า) ให้ข้าม
-            if len(image_list) == 1 and width >= 700 and height >= 700:
-                continue
+                    # กรองภาพขนาดเล็กมากๆ เช่น เส้นประ, ไอคอนตกแต่ง 1x1 หรือ spacer
+                    if rect.width < 15 or rect.height < 15:
+                        continue
 
-            extracted.append(
-                ExtractedImage(
-                    page_num=page_num,
-                    image_index=img_idx + 1,
-                    image_bytes=image_bytes,
-                    ext=image_ext,
-                    width=width,
-                    height=height,
-                    bbox=bbox,
+                    # กรองภาพสแกนเอกสารทั้งหน้า (> 60% ของพื้นที่หน้ากระดาษ)
+                    img_area = rect.width * rect.height
+                    if page_area > 0 and (img_area / page_area) > 0.60:
+                        continue
+
+                    try:
+                        # เรนเดอร์ภาพจากหน้าเอกสารโดยตรงเพื่อรักษา Alpha Channel, Soft Mask และสีที่ถูกต้อง 100%
+                        # (แก้ปัญหารหัส QR Code หรือภาพโปร่งใสกลายเป็นกล่องดำทึบ)
+                        pix = page.get_pixmap(clip=rect, dpi=200)
+                        img_bytes = pix.tobytes(output="png")
+                        bbox = (rect.x0, rect.y0, rect.x1, rect.y1)
+
+                        extracted.append(
+                            ExtractedImage(
+                                page_num=page_num,
+                                image_index=len(extracted) + 1,
+                                image_bytes=img_bytes,
+                                ext="png",
+                                width=pix.width,
+                                height=pix.height,
+                                bbox=bbox,
+                            )
+                        )
+                    except Exception:
+                        # Fallback กรณีเรนเดอร์ล้มเหลว
+                        base_image = doc.extract_image(xref)
+                        extracted.append(
+                            ExtractedImage(
+                                page_num=page_num,
+                                image_index=len(extracted) + 1,
+                                image_bytes=base_image.get("image"),
+                                ext=base_image.get("ext", "png"),
+                                width=base_image.get("width", 0),
+                                height=base_image.get("height", 0),
+                                bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
+                            )
+                        )
+            else:
+                # กรณีไม่มี rect บนหน้า (ภาพที่ไม่ถูกวาดตรงๆ บนเลเยอร์หน้า)
+                base_image = doc.extract_image(xref)
+                width = base_image.get("width", 0)
+                height = base_image.get("height", 0)
+                if width < 40 or height < 40:
+                    continue
+                if len(image_list) == 1 and width >= 700 and height >= 700:
+                    continue
+
+                extracted.append(
+                    ExtractedImage(
+                        page_num=page_num,
+                        image_index=len(extracted) + 1,
+                        image_bytes=base_image.get("image"),
+                        ext=base_image.get("ext", "png"),
+                        width=width,
+                        height=height,
+                        bbox=None,
+                    )
                 )
+
+        # จัดเรียงรูปภาพตามลำดับการอ่านจริงจากบนลงล่าง และจากซ้ายไปขวา (y0, x0)
+        extracted.sort(
+            key=lambda img: (
+                img.bbox[1] if img.bbox else 9999.0,
+                img.bbox[0] if img.bbox else 9999.0,
             )
+        )
+
+        # รันหมายเลขลำดับรูปภาพใหม่ให้ตรงกับลำดับบนลงล่าง
+        for idx, img in enumerate(extracted, start=1):
+            img.image_index = idx
 
         return extracted

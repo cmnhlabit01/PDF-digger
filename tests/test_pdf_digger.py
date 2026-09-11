@@ -10,7 +10,7 @@ from PIL import Image
 
 from src.config import DEFAULT_FONT, FALLBACK_MODELS
 from src.docx_builder import DocxBuilder
-from src.gemini_extractor import GeminiExtractor
+from src.gemini_extractor import GeminiExtractor, clean_thai_ocr_text
 from src.pdf_processor import ExtractedImage, PDFProcessor, enhance_document_image
 
 
@@ -342,6 +342,115 @@ class TestPDFDigger(unittest.TestCase):
         self.assertEqual(doc_check.paragraphs[5].alignment, WD_ALIGN_PARAGRAPH.RIGHT)
 
         print("✅ ทดสอบ Layout Alignment, Font Scaling & Image 1:1 Bbox Sizing สำเร็จ")
+
+    def test_table_cell_formatting_and_image(self):
+        """ทดสอบการประมวลผลภายในเซลล์ตาราง: แยกบรรทัด <br>, แท็ก [CENTER], ตัวหนา และการแทรกรูปภาพในเซลล์"""
+        builder = DocxBuilder(font_name="Cordia New")
+
+        # ตรวจสอบว่าระยะขอบหน้ากระดาษเป็น 0.5 นิ้ว
+        for section in builder.doc.sections:
+            self.assertAlmostEqual(section.top_margin.inches, 0.5)
+            self.assertAlmostEqual(section.left_margin.inches, 0.5)
+
+        markdown_table = (
+            "| ข้อมูลผู้ส่งและผู้รับ | รายละเอียดบาร์โค้ด |\n"
+            "|---|---|\n"
+            "| **ผู้ส่ง (FROM)** **กฤต**<br>2 ถนน สุเทพ (ชั้น 3)<br>**ผู้รับ (TO)** **Huang** | [IMAGE]<br>[CENTER]**TH2608793615733**[/CENTER] |\n"
+        )
+
+        img_buffer = io.BytesIO()
+        pil_img = Image.new("RGB", (120, 60), color="black")
+        pil_img.save(img_buffer, format="PNG")
+        dummy_barcode = ExtractedImage(
+            page_num=0,
+            image_index=1,
+            image_bytes=img_buffer.getvalue(),
+            ext="png",
+            width=120,
+            height=60,
+            bbox=(350.0, 40.0, 520.0, 90.0),
+        )
+
+        builder.add_page_content(
+            markdown_text=markdown_table,
+            page_num=1,
+            images=[dummy_barcode],
+            is_first_page=True,
+        )
+
+        out_path = self.test_dir / "test_table_cell_doc.docx"
+        builder.save(out_path)
+        self.assertTrue(out_path.exists())
+
+        saved_doc = docx.Document(str(out_path))
+        self.assertEqual(len(saved_doc.tables), 1)
+        tbl = saved_doc.tables[0]
+
+        # ตรวจสอบเซลล์ฝั่งซ้าย (แถวที่ 1 คอลัมน์ที่ 0): ต้องถูกแยกเป็น 3 paragraphs จาก <br>
+        left_cell = tbl.rows[1].cells[0]
+        self.assertGreaterEqual(len(left_cell.paragraphs), 3)
+        self.assertNotIn("<br>", left_cell.text)
+        self.assertNotIn("**", left_cell.text)
+        self.assertIn("ผู้ส่ง (FROM)", left_cell.paragraphs[0].text)
+
+        # ตรวจสอบเซลล์ฝั่งขวา (แถวที่ 1 คอลัมน์ที่ 1): ต้องมีรูปภาพบาร์โค้ด และข้อความ TH... ที่จัดกึ่งกลางโดยไม่มีแท็กดิบหลุด
+        right_cell = tbl.rows[1].cells[1]
+        self.assertNotIn("[CENTER]", right_cell.text)
+        self.assertNotIn("[/CENTER]", right_cell.text)
+        self.assertNotIn("**", right_cell.text)
+        self.assertIn("TH2608793615733", right_cell.text)
+
+        # ตรวจสอบว่าบรรทัดรหัสถูกจัดกึ่งกลาง
+        code_p = [p for p in right_cell.paragraphs if "TH2608793615733" in p.text][0]
+        self.assertEqual(code_p.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+
+        print("✅ ทดสอบ Table Cell Formatting (<br>, [CENTER], Bold, [IMAGE]) สำเร็จ")
+
+    def test_thai_ocr_cleaner_and_image_sorting(self):
+        """ทดสอบฟังก์ชันแก้คำผิดวรรณยุกต์ไทย และการจัดเรียงรูปภาพตามพิกัดสายตา (y0, x0)"""
+        # 1. ทดสอบการทำความสะอาดวรรณยุกต์ไทย
+        raw_typos = (
+            "กฤต อยู่ชั2น 3 วันที2 11 ขั#นตอนการส่งคืน เพืLอความรวดเร็ว ช้อปปี2 "
+            "เพิ2มเติม สิ3นสุด และไม่ตอ้งเกบ็ เงิน"
+        )
+        cleaned = clean_thai_ocr_text(raw_typos)
+        self.assertIn("ชั้น 3", cleaned)
+        self.assertIn("วันที่ 11", cleaned)
+        self.assertIn("ขั้นตอนการส่งคืน", cleaned)
+        self.assertIn("เพื่อความรวดเร็ว", cleaned)
+        self.assertIn("ช้อปปี้", cleaned)
+        self.assertIn("เพิ่มเติม", cleaned)
+        self.assertIn("สิ้นสุด", cleaned)
+        self.assertIn("ไม่ต้องเก็บ เงิน", cleaned)
+
+        # 2. ทดสอบการจัดเรียงรูปภาพตามพิกัด (y0, x0) ใน PDFProcessor
+        test_pdf = self.test_dir / "test_sort_images.pdf"
+        doc = fitz.open()
+        page = doc.new_page(width=595, height=842)
+
+        # สร้างภาพ 2 รูป: ใส่รูปล่างก่อน (y=500), แล้วใส่รูปบน (y=50)
+        img_buf = io.BytesIO()
+        Image.new("RGB", (50, 50), color="blue").save(img_buf, format="PNG")
+        page.insert_image(fitz.Rect(50, 500, 100, 550), stream=img_buf.getvalue())  # รูปล่าง
+        page.insert_image(fitz.Rect(50, 50, 100, 100), stream=img_buf.getvalue())    # รูปบน
+        doc.save(str(test_pdf))
+        doc.close()
+
+        proc = PDFProcessor(test_pdf)
+        pdata = proc.process_page(0)
+
+        # ตรวจสอบว่ารูปภาพถูกจัดเรียงจากบนลงล่าง (รูปแรกต้องมี y0 อยู่แถว 50, รูปสอง y0 อยู่แถว 500)
+        self.assertEqual(len(pdata.embedded_images), 2)
+        first_img = pdata.embedded_images[0]
+        second_img = pdata.embedded_images[1]
+
+        self.assertIsNotNone(first_img.bbox)
+        self.assertIsNotNone(second_img.bbox)
+        self.assertLess(first_img.bbox[1], second_img.bbox[1])
+        self.assertEqual(first_img.image_index, 1)
+        self.assertEqual(second_img.image_index, 2)
+
+        print("✅ ทดสอบ Thai OCR Cleaner & Image Spatial Sorting (y0, x0) สำเร็จ")
 
 
 if __name__ == "__main__":
