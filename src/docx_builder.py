@@ -84,6 +84,22 @@ def set_table_borderless(table):
     tblPr.append(tblBorders)
 
 
+def set_table_horizontal_borders(table):
+    """กำหนดเส้นขอบตารางเฉพาะแนวนอน (ไม่มีเส้นแนวตั้ง) สไตล์รายงานผลแล็บ/วิจัย/งบการเงิน"""
+    tblPr = table._tbl.tblPr
+    tblBorders = parse_xml(
+        f'<w:tblBorders {nsdecls("w")}>'
+        f'  <w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
+        f'  <w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
+        f'  <w:left w:val="none"/>'
+        f'  <w:right w:val="none"/>'
+        f'  <w:insideH w:val="single" w:sz="4" w:space="0" w:color="D3D3D3"/>'
+        f'  <w:insideV w:val="none"/>'
+        f'</w:tblBorders>'
+    )
+    tblPr.append(tblBorders)
+
+
 class DocxBuilder:
     """คลาสสร้างเอกสาร Word (.docx) จาก Markdown ที่ได้จาก Gemini พร้อมแทรกตาราง รูปภาพ และการจัดหน้าตามต้นฉบับ"""
 
@@ -178,10 +194,16 @@ class DocxBuilder:
                 i += 1
                 continue
 
-            # 2. ตรวจสอบตาราง (Markdown Table) และแท็ก [BORDERLESS]
+            # 2. ตรวจสอบตาราง (Markdown Table) และแท็กกำหนดเส้นขอบ
             is_borderless_table = False
+            is_horizontal_only_table = False
             if "[BORDERLESS]" in raw_line.upper() or "[NO_BORDER]" in raw_line.upper():
                 is_borderless_table = True
+                i += 1
+                if i < len(lines):
+                    raw_line = lines[i].strip()
+            elif "[HORIZONTAL_ONLY]" in raw_line.upper() or "[HORIZONTAL_BORDERS]" in raw_line.upper():
+                is_horizontal_only_table = True
                 i += 1
                 if i < len(lines):
                     raw_line = lines[i].strip()
@@ -191,7 +213,12 @@ class DocxBuilder:
                 while i < len(lines) and lines[i].strip().startswith("|") and ("|" in lines[i].strip()[1:]):
                     table_lines.append(lines[i].strip())
                     i += 1
-                self._create_word_table(table_lines, images_queue=images_queue, is_borderless=is_borderless_table)
+                self._create_word_table(
+                    table_lines,
+                    images_queue=images_queue,
+                    is_borderless=is_borderless_table,
+                    is_horizontal_only=is_horizontal_only_table,
+                )
                 continue
 
             # 3. ตรวจสอบแท็กรูปภาพเดี่ยว [IMAGE] (ที่ไม่ได้อยู่ในตาราง)
@@ -330,6 +357,7 @@ class DocxBuilder:
         table_lines: List[str],
         images_queue: Optional[List[ExtractedImage]] = None,
         is_borderless: bool = False,
+        is_horizontal_only: bool = False,
     ):
         """แปลงตาราง Markdown เป็น Table Object ของ Word พร้อมจัดขอบตาราง ถอดรหัสแท็ก และแทรกรูปในเซลล์"""
         if not table_lines:
@@ -337,9 +365,12 @@ class DocxBuilder:
 
         parsed_rows = []
         for line in table_lines:
-            # ตรวจสอบแท็ก [BORDERLESS] ในบรรทัดตาราง
+            # ตรวจสอบแท็ก [BORDERLESS] หรือ [HORIZONTAL_ONLY] ในบรรทัดตาราง
             if "[BORDERLESS]" in line.upper() or "[NO_BORDER]" in line.upper():
                 is_borderless = True
+                continue
+            if "[HORIZONTAL_ONLY]" in line.upper() or "[HORIZONTAL_BORDERS]" in line.upper():
+                is_horizontal_only = True
                 continue
 
             # ตัด | ตัวแรกและตัวสุดท้ายออก
@@ -365,15 +396,26 @@ class DocxBuilder:
         num_cols = max(len(r) for r in parsed_rows)
         num_rows = len(parsed_rows)
 
-        # ตรวจสอบว่าเป็นตารางส่วนหัวแบบไร้ขอบโดยอัตโนมัติหรือไม่
-        if not is_borderless:
-            if len(parsed_rows) == 1 and any("PICK UP" in c.upper() or "SPX" in c.upper() for c in parsed_rows[0]):
+        # ตรวจสอบและตรวจจับอัตโนมัติ (Smart Auto-detection สำหรับรายงานผลแล็บและบล็อกลายเซ็น)
+        all_text = " ".join(" ".join(r) for r in parsed_rows).lower()
+        if not is_borderless and not is_horizontal_only:
+            # 1. ตรวจจับบล็อกลงลายมือชื่อและข้อมูลผู้ป่วย (Signature & Patient blocks) -> ไร้ขอบ 100%
+            sig_keywords = ["reported by", "approved by", "medical technologist", "ผู้รายงาน", "ผู้รับรอง", "ผู้มีอำนาจลงนาม", "ลายมือชื่อ"]
+            patient_keywords = ["patient's name", "hospital no", "opd / ward", "lab barcode"]
+            if any(k in all_text for k in sig_keywords) or any(k in all_text for k in patient_keywords):
+                is_borderless = True
+            # 2. ตรวจจับตารางผลตรวจแล็บ / ทางการแพทย์ (มี Test Name / Result / Reference Range) -> เฉพาะเส้นแนวนอน
+            elif any(k in all_text for k in ["test name", "parameters", "reference range"]) and not any(k in all_text for k in ["shopee", "barcode", "tracking"]):
+                is_horizontal_only = True
+            elif len(parsed_rows) == 1 and any("PICK UP" in c.upper() or "SPX" in c.upper() for c in parsed_rows[0]):
                 is_borderless = True
 
         table = self.doc.add_table(rows=num_rows, cols=num_cols)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         if is_borderless:
             set_table_borderless(table)
+        elif is_horizontal_only:
+            set_table_horizontal_borders(table)
         else:
             table.style = "Table Grid"
         # ขอบเซลล์แบบกะทัดรัด (Compact cell padding)
