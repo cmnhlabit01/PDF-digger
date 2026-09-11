@@ -1,7 +1,7 @@
 import io
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import docx
 from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -16,6 +16,7 @@ from .config import (
     FONT_SIZE_H2,
     FONT_SIZE_H3,
     MAX_DOCX_IMAGE_WIDTH_INCHES,
+    get_font_sizes,
 )
 from .pdf_processor import ExtractedImage
 
@@ -66,10 +67,11 @@ def set_table_margins(table, top: int = 100, bottom: int = 100, left: int = 150,
 
 
 class DocxBuilder:
-    """คลาสสร้างเอกสาร Word (.docx) จาก Markdown ที่ได้จาก Gemini พร้อมแทรกตารางและรูปภาพ"""
+    """คลาสสร้างเอกสาร Word (.docx) จาก Markdown ที่ได้จาก Gemini พร้อมแทรกตาราง รูปภาพ และการจัดหน้าตามต้นฉบับ"""
 
     def __init__(self, font_name: str = DEFAULT_FONT):
         self.font_name = font_name
+        self.font_sizes = get_font_sizes(self.font_name)
         self.doc = docx.Document()
         self._setup_document_styles()
 
@@ -77,6 +79,7 @@ class DocxBuilder:
         """เปลี่ยนหรืออัปเดตฟอนต์ของเอกสาร (เช่น เมื่อตรวจพบฟอนต์จากต้นฉบับ)"""
         if font_name and font_name.strip():
             self.font_name = font_name.strip()
+            self.font_sizes = get_font_sizes(self.font_name)
             self._setup_document_styles()
 
     def _setup_document_styles(self):
@@ -91,9 +94,36 @@ class DocxBuilder:
         # สไตล์ Normal
         style_normal = self.doc.styles["Normal"]
         style_normal.font.name = self.font_name
-        style_normal.font.size = Pt(FONT_SIZE_BODY)
+        style_normal.font.size = Pt(self.font_sizes["body"])
         style_normal.paragraph_format.line_spacing = 1.15
         style_normal.paragraph_format.space_after = Pt(4)
+
+    def parse_line_formatting(self, raw_line: str) -> Tuple[str, Optional[WD_ALIGN_PARAGRAPH], bool]:
+        """
+        ตรวจจับแท็กการจัดตำแหน่ง [CENTER], [RIGHT], [JUSTIFY] และแท็กขนาด [SMALL]
+        คืนค่า: (cleaned_line, alignment, is_small)
+        """
+        alignment = None
+        is_small = False
+        cleaned = raw_line.strip()
+
+        # ตรวจสอบแท็กขนาดเล็ก
+        if "[SMALL]" in cleaned.upper() or "[/SMALL]" in cleaned.upper():
+            is_small = True
+            cleaned = re.sub(r"\[/?SMALL\]", "", cleaned, flags=re.IGNORECASE).strip()
+
+        # ตรวจสอบแท็กจัดตำแหน่ง
+        if "[CENTER]" in cleaned.upper() or "[/CENTER]" in cleaned.upper():
+            alignment = WD_ALIGN_PARAGRAPH.CENTER
+            cleaned = re.sub(r"\[/?CENTER\]", "", cleaned, flags=re.IGNORECASE).strip()
+        elif "[RIGHT]" in cleaned.upper() or "[/RIGHT]" in cleaned.upper():
+            alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            cleaned = re.sub(r"\[/?RIGHT\]", "", cleaned, flags=re.IGNORECASE).strip()
+        elif "[JUSTIFY]" in cleaned.upper() or "[/JUSTIFY]" in cleaned.upper():
+            alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            cleaned = re.sub(r"\[/?JUSTIFY\]", "", cleaned, flags=re.IGNORECASE).strip()
+
+        return cleaned, alignment, is_small
 
     def add_page_content(
         self,
@@ -104,7 +134,7 @@ class DocxBuilder:
     ):
         """
         แปลงเนื้อหา Markdown ของหนึ่งหน้าลงในเอกสาร Word
-        พร้อมแทรกรูปภาพที่สกัดได้จากหน้านั้นๆ
+        พร้อมแทรกรูปภาพที่สกัดได้จากหน้านั้นๆ และจัดรูปแบบตำแหน่งตามต้นฉบับ
         """
         if not is_first_page:
             # เพิ่มการขึ้นหน้าใหม่ตามต้นฉบับ PDF
@@ -115,15 +145,15 @@ class DocxBuilder:
 
         i = 0
         while i < len(lines):
-            line = lines[i].strip()
+            raw_line = lines[i].strip()
 
             # 1. บรรทัดว่าง
-            if not line:
+            if not raw_line:
                 i += 1
                 continue
 
             # 2. ตรวจสอบแท็กรูปภาพ [IMAGE]
-            if "[IMAGE]" in line:
+            if "[IMAGE]" in raw_line.upper():
                 if images_queue:
                     img = images_queue.pop(0)
                     self._insert_image(img)
@@ -131,7 +161,7 @@ class DocxBuilder:
                 continue
 
             # 3. ตรวจสอบตาราง (Markdown Table)
-            if line.startswith("|") and line.endswith("|"):
+            if raw_line.startswith("|") and raw_line.endswith("|"):
                 table_lines = []
                 while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
                     table_lines.append(lines[i].strip())
@@ -139,29 +169,44 @@ class DocxBuilder:
                 self._create_word_table(table_lines)
                 continue
 
+            # ตรวจสอบและแยกแท็กจัดตำแหน่งและขนาดก่อน
+            line, alignment, is_small = self.parse_line_formatting(raw_line)
+            if not line:
+                i += 1
+                continue
+
             # 4. ตรวจสอบหัวข้อ (Headings)
             if line.startswith("### "):
                 p = self.doc.add_paragraph()
                 p.paragraph_format.space_before = Pt(6)
                 p.paragraph_format.space_after = Pt(2)
-                run = p.add_run(line[4:].strip())
-                set_run_font(run, self.font_name, FONT_SIZE_H3, bold=True)
+                p.paragraph_format.keep_with_next = True
+                if alignment:
+                    p.alignment = alignment
+                font_sz = self.font_sizes["h3"] if not is_small else self.font_sizes["small"]
+                self._add_formatted_text_to_paragraph(p, line[4:].strip(), size_pt=font_sz, bold=True)
                 i += 1
                 continue
             elif line.startswith("## "):
                 p = self.doc.add_paragraph()
                 p.paragraph_format.space_before = Pt(8)
                 p.paragraph_format.space_after = Pt(3)
-                run = p.add_run(line[3:].strip())
-                set_run_font(run, self.font_name, FONT_SIZE_H2, bold=True)
+                p.paragraph_format.keep_with_next = True
+                if alignment:
+                    p.alignment = alignment
+                font_sz = self.font_sizes["h2"] if not is_small else self.font_sizes["small"]
+                self._add_formatted_text_to_paragraph(p, line[3:].strip(), size_pt=font_sz, bold=True)
                 i += 1
                 continue
             elif line.startswith("# "):
                 p = self.doc.add_paragraph()
                 p.paragraph_format.space_before = Pt(12)
                 p.paragraph_format.space_after = Pt(4)
-                run = p.add_run(line[2:].strip())
-                set_run_font(run, self.font_name, FONT_SIZE_H1, bold=True)
+                p.paragraph_format.keep_with_next = True
+                if alignment:
+                    p.alignment = alignment
+                font_sz = self.font_sizes["h1"] if not is_small else self.font_sizes["small"]
+                self._add_formatted_text_to_paragraph(p, line[2:].strip(), size_pt=font_sz, bold=True)
                 i += 1
                 continue
 
@@ -170,7 +215,10 @@ class DocxBuilder:
                 p = self.doc.add_paragraph(style="List Bullet")
                 p.paragraph_format.space_after = Pt(2)
                 p.paragraph_format.line_spacing = 1.15
-                self._add_formatted_text_to_paragraph(p, line[2:].strip())
+                if alignment:
+                    p.alignment = alignment
+                font_sz = self.font_sizes["body"] if not is_small else self.font_sizes["small"]
+                self._add_formatted_text_to_paragraph(p, line[2:].strip(), size_pt=font_sz)
                 i += 1
                 continue
 
@@ -180,7 +228,10 @@ class DocxBuilder:
                 p = self.doc.add_paragraph(style="List Number")
                 p.paragraph_format.space_after = Pt(2)
                 p.paragraph_format.line_spacing = 1.15
-                self._add_formatted_text_to_paragraph(p, num_match.group(2).strip())
+                if alignment:
+                    p.alignment = alignment
+                font_sz = self.font_sizes["body"] if not is_small else self.font_sizes["small"]
+                self._add_formatted_text_to_paragraph(p, num_match.group(2).strip(), size_pt=font_sz)
                 i += 1
                 continue
 
@@ -188,25 +239,41 @@ class DocxBuilder:
             p = self.doc.add_paragraph()
             p.paragraph_format.line_spacing = 1.15
             p.paragraph_format.space_after = Pt(4)
-            self._add_formatted_text_to_paragraph(p, line)
+            if alignment:
+                p.alignment = alignment
+                if alignment == WD_ALIGN_PARAGRAPH.JUSTIFY:
+                    p.paragraph_format.first_line_indent = Inches(0.4)
+            elif len(line) > 80 and not any(line.startswith(pfx) for pfx in ["ที่ ", "เรื่อง ", "เรียน ", "ถึง ", "จาก ", "วันที่ ", "เอกสาร "]):
+                p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                p.paragraph_format.first_line_indent = Inches(0.4)
+
+            font_sz = self.font_sizes["body"] if not is_small else self.font_sizes["small"]
+            self._add_formatted_text_to_paragraph(p, line, size_pt=font_sz)
             i += 1
 
-    def _add_formatted_text_to_paragraph(self, paragraph, text: str):
-        """แยกแท็กตัวหนา (**ข้อความ**) และตัวเอียง (*ข้อความ*) ออกมาใส่ใน Run"""
-        # Regex สำหรับจับกลุ่มตัวหนา **text** หรือ ตัวเอียง *text*
+    def _add_formatted_text_to_paragraph(
+        self,
+        paragraph,
+        text: str,
+        size_pt: Optional[float] = None,
+        bold: bool = False,
+        italic: bool = False,
+    ):
+        """แยกแท็กตัวหนา (**ข้อความ**) และตัวเอียง (*ข้อความ*) ออกมาใส่ใน Run พร้อมกำหนดขนาด"""
+        actual_size = size_pt if size_pt is not None else self.font_sizes["body"]
         tokens = re.split(r"(\*\*.*?\*\*|\*.*?\*)", text)
         for token in tokens:
             if not token:
                 continue
             if token.startswith("**") and token.endswith("**") and len(token) >= 4:
                 run = paragraph.add_run(token[2:-2])
-                set_run_font(run, self.font_name, FONT_SIZE_BODY, bold=True)
+                set_run_font(run, self.font_name, actual_size, bold=True, italic=italic)
             elif token.startswith("*") and token.endswith("*") and len(token) >= 2:
                 run = paragraph.add_run(token[1:-1])
-                set_run_font(run, self.font_name, FONT_SIZE_BODY, italic=True)
+                set_run_font(run, self.font_name, actual_size, bold=bold, italic=True)
             else:
                 run = paragraph.add_run(token)
-                set_run_font(run, self.font_name, FONT_SIZE_BODY)
+                set_run_font(run, self.font_name, actual_size, bold=bold, italic=italic)
 
     def _create_word_table(self, table_lines: List[str]):
         """แปลงตาราง Markdown เป็น Table Object ของ Word พร้อมจัดขอบตารางและหัวตาราง"""
@@ -270,11 +337,11 @@ class DocxBuilder:
                 run = p.add_run(cell_text)
 
                 if is_header:
-                    set_run_font(run, self.font_name, size_pt=FONT_SIZE_BODY, bold=True)
+                    set_run_font(run, self.font_name, size_pt=self.font_sizes["body"], bold=True)
                     set_cell_background(cell, "F2F2F2")  # สีพื้นหลังหัวตารางสีเทาอ่อน
                     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 else:
-                    set_run_font(run, self.font_name, size_pt=FONT_SIZE_BODY - 1, bold=False)
+                    set_run_font(run, self.font_name, size_pt=max(8.0, self.font_sizes["body"] - 1), bold=False)
                     # ตรวจสอบว่าเป็นตัวเลขหรือไม่เพื่อจัดชิดขวา
                     if re.match(r"^[\$฿€¥]?\s*[\d,]+(\.\d+)?%?$", cell_text.strip()):
                         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -287,27 +354,43 @@ class DocxBuilder:
         p_after.paragraph_format.space_after = Pt(4)
 
     def _insert_image(self, img: ExtractedImage):
-        """แทรกรูปภาพลงในเอกสาร Word พร้อมจัดขนาดไม่ให้ล้นขอบ"""
+        """แทรกรูปภาพลงในเอกสาร Word โดยรักษาขนาดจริง 1:1 และตำแหน่งชิดซ้าย/กลาง/ขวา"""
         try:
             image_stream = io.BytesIO(img.image_bytes)
             p = self.doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.space_before = Pt(6)
             p.paragraph_format.space_after = Pt(6)
 
-            # กำหนดขนาดรูปภาพตามสัดส่วน
-            run = p.add_run()
-            # คำนวณความกว้างที่เหมาะสม (สูงสุดไม่เกิน MAX_DOCX_IMAGE_WIDTH_INCHES)
-            width_in_inches = min(img.width / 150.0, MAX_DOCX_IMAGE_WIDTH_INCHES)
-            if width_in_inches < 1.0:
-                width_in_inches = 2.0  # ขยายรูปเล็กให้อ่านง่ายขึ้น
+            # 1. คำนวณขนาดจริงและความกว้าง (Physical sizing 1:1)
+            if img.bbox and len(img.bbox) == 4:
+                # PDF points: 72 points = 1 inch
+                bbox_w_pt = abs(img.bbox[2] - img.bbox[0])
+                width_in_inches = bbox_w_pt / 72.0
+                # จำกัดขนาดความกว้างระหว่าง 0.4 นิ้ว ถึงค่าสูงสุดหน้ากระดาษ
+                width_in_inches = max(0.4, min(width_in_inches, MAX_DOCX_IMAGE_WIDTH_INCHES))
 
+                # 2. คำนวณการจัดตำแหน่งแนวนอนจาก Bounding Box
+                # หน้า A4 กว้าง ~595 pt (ขอบซ้าย 72 pt, ขอบขวา 523 pt)
+                center_x = (img.bbox[0] + img.bbox[2]) / 2.0
+                if center_x < 220.0:
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                elif center_x > 375.0:
+                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                else:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                # กรณีไม่มี bbox (เช่น ไฟล์รูปภาพเดี่ยว หรือ fallback)
+                width_in_inches = min(img.width / 150.0, MAX_DOCX_IMAGE_WIDTH_INCHES)
+                width_in_inches = max(0.6, width_in_inches)
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+            run = p.add_run()
             run.add_picture(image_stream, width=Inches(width_in_inches))
         except Exception as e:
             # หากแทรกรูปภาพล้มเหลว ให้ใส่ข้อความเตือนแทนโดยไม่ให้กระบวนการหลักหยุดชะงัก
             p = self.doc.add_paragraph()
             run = p.add_run(f"[ภาพประกอบ {img.image_index}]")
-            set_run_font(run, self.font_name, FONT_SIZE_BODY, italic=True)
+            set_run_font(run, self.font_name, self.font_sizes["body"], italic=True)
 
     def save(self, output_path: str | Path):
         """บันทึกเอกสาร Word ลงในไฟล์เป้าหมาย"""

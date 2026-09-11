@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import docx
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import pymupdf as fitz
 from PIL import Image
 
@@ -243,6 +244,104 @@ class TestPDFDigger(unittest.TestCase):
             self.assertIn("แปลเนื้อหาทั้งหมดเป็นภาษาอังกฤษ", captured_prompt)
 
             print("✅ ทดสอบ Translation Prompt Generation (แปลไทย/อังกฤษ) สำเร็จ")
+
+    def test_layout_alignment_and_image_bbox(self):
+        """ทดสอบการจัดตำแหน่ง (Center, Right, Justify), ขนาดตัวอักษร Small/Metric Scaling และการจัดตำแหน่งรูปภาพจาก bbox"""
+        builder = DocxBuilder(font_name="Cordia New")
+
+        # 1. ทดสอบการถอดรหัสแท็กจัดหน้า (parse_line_formatting)
+        raw_center = "[CENTER]# หัวข้อกึ่งกลางหน้ากระดาษ[/CENTER]"
+        cleaned, align, is_small = builder.parse_line_formatting(raw_center)
+        self.assertEqual(cleaned, "# หัวข้อกึ่งกลางหน้ากระดาษ")
+        self.assertEqual(align, WD_ALIGN_PARAGRAPH.CENTER)
+        self.assertFalse(is_small)
+
+        raw_right_small = "[RIGHT][SMALL]วันที่ ๑๕ มกราคม ๒๕๖๗[/SMALL][/RIGHT]"
+        cleaned, align, is_small = builder.parse_line_formatting(raw_right_small)
+        self.assertEqual(cleaned, "วันที่ ๑๕ มกราคม ๒๕๖๗")
+        self.assertEqual(align, WD_ALIGN_PARAGRAPH.RIGHT)
+        self.assertTrue(is_small)
+
+        # 2. ทดสอบ Metric Font Scaling เมื่อสลับไปใช้ Calibri
+        builder_calibri = DocxBuilder(font_name="Calibri")
+        self.assertEqual(builder_calibri.font_sizes["body"], 11.5)
+        self.assertEqual(builder_calibri.font_sizes["h1"], 16.0)
+        self.assertEqual(builder.font_sizes["body"], 16.0)
+        self.assertEqual(builder.font_sizes["h1"], 22.0)
+
+        # 3. ทดสอบการสร้างพารากราฟและการวางตำแหน่งรูปภาพตาม Bounding Box (1:1 Sizing)
+        markdown_content = (
+            "[CENTER]# บันทึกข้อความ[/CENTER]\n"
+            "[RIGHT]ส่วนราชการ สำนักนายกรัฐมนตรี[/RIGHT]\n"
+            "[JUSTIFY]ด้วยสำนักงานมีความประสงค์จะจัดประชุมสัมมนาเชิงปฏิบัติการเพื่อพัฒนาระบบเทคโนโลยีสารสนเทศ[/JUSTIFY]\n"
+            "[SMALL]หมายเหตุ: ข้อความขนาดเล็กส่วนท้ายเอกสาร[/SMALL]\n"
+            "[IMAGE]\n"
+            "[IMAGE]\n"
+        )
+
+        # จำลองรูปภาพ 2 รูป: รูปแรกอยู่ตรงกลาง (ตราครุฑ), รูปที่สองอยู่มุมขวา (ตรายางรับหนังสือ)
+        img_buffer = io.BytesIO()
+        pil_img = Image.new("RGB", (100, 100), color="green")
+        pil_img.save(img_buffer, format="PNG")
+        raw_img_bytes = img_buffer.getvalue()
+
+        # รูปที่ 1: x0=250, x1=345 (ตรงกลางหน้า A4 กว้าง ~595 pt)
+        img_center = ExtractedImage(
+            page_num=0,
+            image_index=1,
+            image_bytes=raw_img_bytes,
+            ext="png",
+            width=95,
+            height=95,
+            bbox=(250.0, 50.0, 345.0, 145.0),
+        )
+
+        # รูปที่ 2: x0=450, x1=530 (มุมขวาบน)
+        img_right = ExtractedImage(
+            page_num=0,
+            image_index=2,
+            image_bytes=raw_img_bytes,
+            ext="png",
+            width=80,
+            height=80,
+            bbox=(450.0, 50.0, 530.0, 130.0),
+        )
+
+        builder.add_page_content(
+            markdown_text=markdown_content,
+            page_num=1,
+            images=[img_center, img_right],
+            is_first_page=True,
+        )
+
+        out_path = self.test_dir / "test_layout_doc.docx"
+        builder.save(out_path)
+        self.assertTrue(out_path.exists())
+
+        doc_check = docx.Document(str(out_path))
+        # ตรวจสอบการจัดตำแหน่งพารากราฟ
+        # Paragraph 0: Center Heading
+        self.assertEqual(doc_check.paragraphs[0].alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        self.assertEqual(doc_check.paragraphs[0].text.strip(), "บันทึกข้อความ")
+
+        # Paragraph 1: Right aligned metadata
+        self.assertEqual(doc_check.paragraphs[1].alignment, WD_ALIGN_PARAGRAPH.RIGHT)
+        self.assertEqual(doc_check.paragraphs[1].text.strip(), "ส่วนราชการ สำนักนายกรัฐมนตรี")
+
+        # Paragraph 2: Justified body paragraph
+        self.assertEqual(doc_check.paragraphs[2].alignment, WD_ALIGN_PARAGRAPH.JUSTIFY)
+
+        # Paragraph 3: Small text size check (13pt for Cordia)
+        self.assertAlmostEqual(doc_check.paragraphs[3].runs[0].font.size.pt, 13.0)
+
+        # ตรวจสอบการจัดตำแหน่งของรูปภาพ:
+        # Paragraph 4: Image Center
+        self.assertEqual(doc_check.paragraphs[4].alignment, WD_ALIGN_PARAGRAPH.CENTER)
+
+        # Paragraph 5: Image Right
+        self.assertEqual(doc_check.paragraphs[5].alignment, WD_ALIGN_PARAGRAPH.RIGHT)
+
+        print("✅ ทดสอบ Layout Alignment, Font Scaling & Image 1:1 Bbox Sizing สำเร็จ")
 
 
 if __name__ == "__main__":
