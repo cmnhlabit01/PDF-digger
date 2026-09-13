@@ -997,7 +997,98 @@ class TestPDFDigger(unittest.TestCase):
 
         print("✅ ทดสอบ PDFProcessor Dimensions & Geometric Header/Footer Hints สำเร็จ")
 
+    def test_json_array_unwrapping_and_anti_leak_guard(self):
+        """ทดสอบการถอดรหัส JSON ที่ถูกครอบด้วย Array [...] และระบบ Anti-Leak Guard ไม่ให้โค้ด JSON หลุดลง Word"""
+        from src.gemini_extractor import unwrap_gemini_json, is_raw_json_code
+
+        # 1. ทดสอบ unwrap_gemini_json กับกรณี Array ครอบ Root Object [ { "blocks": ... } ]
+        sample_array_json = """
+        [
+          {
+            "page_type": "document",
+            "detected_font": "TH Sarabun New",
+            "blocks": [
+              {
+                "type": "heading",
+                "level": 1,
+                "text": "หัวข้อที่ถูกครอบด้วย Array",
+                "align": "left"
+              },
+              {
+                "type": "paragraph",
+                "text": "เนื้อหาย่อหน้าที่ต้องไม่กลายเป็นโค้ด JSON",
+                "align": "left"
+              }
+            ]
+          }
+        ]
+        """
+        is_valid, normalized, font = unwrap_gemini_json(sample_array_json)
+        self.assertTrue(is_valid)
+        self.assertIsNotNone(normalized)
+        self.assertEqual(len(normalized["blocks"]), 2)
+        self.assertEqual(font, "TH Sarabun New")
+
+        # 2. ทดสอบ DocxBuilder ว่าสามารถ Parse JSON Array ได้ ไม่ทำหลุดเป็นโค้ดใน Word
+        builder = DocxBuilder()
+        builder.add_page_content(
+            markdown_text=sample_array_json,
+            page_num=1,
+            is_first_page=True,
+        )
+
+        out_path = self.test_dir / "test_anti_leak_output.docx"
+        builder.save(out_path)
+        self.assertTrue(out_path.exists())
+
+        doc = docx.Document(str(out_path))
+        body_text = "\n".join(p.text for p in doc.paragraphs)
+
+        # ต้องมีเนื้อหาจริง
+        self.assertIn("หัวข้อที่ถูกครอบด้วย Array", body_text)
+        self.assertIn("เนื้อหาย่อหน้าที่ต้องไม่กลายเป็นโค้ด JSON", body_text)
+
+        # ต้องไม่มีไวยากรณ์โค้ด JSON หลุดรอดแม้แต่อักขระเดียว!
+        self.assertNotIn('"page_type":', body_text)
+        self.assertNotIn('"blocks":', body_text)
+        self.assertNotIn('"type": "heading"', body_text)
+        self.assertNotIn('"align":', body_text)
+
+        # 3. ทดสอบระบบ Anti-Leak Guard กรณี JSON ชำรุด (Broken JSON)
+        broken_json = """
+        [
+          {
+            "page_type": "document",
+            "blocks": [
+              {
+                "type": "table",
+                "col_widths_pct": [50, 50],
+                "rows": [
+                  {
+                    "cells": [
+                      {"text": "ข้อความสำคัญในตารางที่ JSON เสียหายกลางคัน
+        """
+        self.assertTrue(is_raw_json_code(broken_json))
+        builder2 = DocxBuilder()
+        builder2.add_page_content(
+            markdown_text=broken_json,
+            page_num=1,
+            is_first_page=True,
+        )
+        out_path2 = self.test_dir / "test_broken_json_safe.docx"
+        builder2.save(out_path2)
+        doc2 = docx.Document(str(out_path2))
+        body2_text = "\n".join(p.text for p in doc2.paragraphs)
+
+        # โค้ด JSON ต้องไม่โผล่ลงไปในย่อหน้าเด็ดขาด
+        self.assertNotIn('"col_widths_pct":', body2_text)
+        self.assertNotIn('"rows":', body2_text)
+        self.assertNotIn('"type": "table"', body2_text)
+
+        print("✅ ทดสอบ JSON Array Unwrapping & Anti-Leak Guard (ป้องกันโค้ด JSON หลุดลง Word 100%) สำเร็จ")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

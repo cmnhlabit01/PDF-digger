@@ -145,6 +145,113 @@ def clean_thai_ocr_text(text: str) -> str:
     return text
 
 
+def is_raw_json_code(text: str) -> bool:
+    """ตรวจสอบว่าข้อความดูเหมือนเป็นโค้ด JSON หรือไม่ เพื่อป้องกันการรั่วไหลลงเอกสาร"""
+    if not text:
+        return False
+    s = text.strip()
+    if (s.startswith("{") or s.startswith("[")) and (
+        '"type":' in s or '"blocks":' in s or '"cells":' in s or '"rows":' in s
+    ):
+        return True
+    if '"type": "table"' in s or '"type": "paragraph"' in s or '"col_widths_pct"' in s:
+        return True
+    return False
+
+
+def fallback_extract_text_from_broken_json(json_str: str) -> List[str]:
+    """สกัดเฉพาะข้อความที่อ่านได้จาก JSON ที่เสีย แทนที่จะปล่อยให้แท็กและโค้ด JSON หลุดลงหน้าเอกสาร"""
+    extracted_lines = []
+    # ค้นหาค่าใน "text": "..."
+    matches = re.findall(r'"text"\s*:\s*"((?:\\.|[^"\\])*)"', json_str)
+    for m in matches:
+        val = m.replace('\\"', '"').replace('\\n', '\n').replace('\\t', ' ').strip()
+        val = clean_thai_ocr_text(val)
+        if val and not is_raw_json_code(val):
+            extracted_lines.append(val)
+    return extracted_lines
+
+
+def unwrap_gemini_json(text: str) -> Tuple[bool, Optional[dict], Optional[str]]:
+    """
+    ถอดรหัสและ Normalize ผลลัพธ์ JSON จาก Gemini ไม่ว่าจะมาในรูปแบบ:
+    1. Single Object: {"page_type": "...", "blocks": [...]}
+    2. Array of Single Object: [{"page_type": "...", "blocks": [...]}]
+    3. Array of Blocks: [{"type": "table", ...}, {"type": "paragraph", ...}]
+    4. มี Markdown code fence: ```json ... ```
+    """
+    from .font_detector import clean_font_name
+    if not text:
+        return False, None, None
+
+    clean_str = text.strip()
+    if clean_str.startswith("```"):
+        clean_str = re.sub(r"^```(?:json)?\s*", "", clean_str)
+        clean_str = re.sub(r"\s*```$", "", clean_str).strip()
+
+    data = None
+    try:
+        data = json.loads(clean_str)
+    except Exception:
+        for open_ch, close_ch in [("{", "}"), ("[", "]")]:
+            start_i = clean_str.find(open_ch)
+            end_i = clean_str.rfind(close_ch)
+            if start_i != -1 and end_i != -1 and end_i > start_i:
+                sub = clean_str[start_i : end_i + 1]
+                try:
+                    data = json.loads(sub)
+                    break
+                except Exception:
+                    sub_fixed = re.sub(r",\s*([\}\]])", r"\1", sub)
+                    try:
+                        data = json.loads(sub_fixed)
+                        break
+                    except Exception:
+                        pass
+
+    if data is None:
+        return False, None, None
+
+    blocks = []
+    page_type = "document"
+    detected_font = None
+
+    if isinstance(data, list):
+        if not data:
+            return False, None, None
+        if isinstance(data[0], dict) and "blocks" in data[0] and isinstance(data[0]["blocks"], list):
+            blocks = data[0]["blocks"]
+            page_type = data[0].get("page_type", "document")
+            font_cand = data[0].get("detected_font") or data[0].get("font_hint")
+            if font_cand:
+                detected_font = clean_font_name(str(font_cand))
+        elif any(isinstance(x, dict) and "type" in x for x in data):
+            blocks = [x for x in data if isinstance(x, dict)]
+    elif isinstance(data, dict):
+        if "blocks" in data and isinstance(data["blocks"], list):
+            blocks = data["blocks"]
+            page_type = data.get("page_type", "document")
+            font_cand = data.get("detected_font") or data.get("font_hint")
+            if font_cand:
+                detected_font = clean_font_name(str(font_cand))
+        else:
+            for val in data.values():
+                if isinstance(val, dict) and "blocks" in val and isinstance(val["blocks"], list):
+                    blocks = val["blocks"]
+                    page_type = val.get("page_type", "document")
+                    break
+
+    if blocks:
+        normalized = {
+            "page_type": page_type,
+            "detected_font": detected_font,
+            "blocks": blocks,
+        }
+        return True, normalized, detected_font
+
+    return False, None, None
+
+
 class GeminiExtractor:
     """โมดูลติดต่อ Gemini API พร้อมระบบ Seamless Model Fallback อัตโนมัติและการแปลภาษา"""
 
@@ -254,33 +361,26 @@ class GeminiExtractor:
                 text = response.text or ""
                 detected_font = None
 
-                # ตรวจสอบและทำความสะอาด Structural JSON
-                clean_json_str = text.strip()
-                if clean_json_str.startswith("```"):
-                    clean_json_str = re.sub(r"^```(?:json)?\s*", "", clean_json_str)
-                    clean_json_str = re.sub(r"\s*```$", "", clean_json_str).strip()
-
-                is_valid_json = False
-                try:
-                    data = json.loads(clean_json_str)
-                    if isinstance(data, dict) and "blocks" in data and isinstance(data["blocks"], list):
-                        is_valid_json = True
-                        font_cand = data.get("detected_font") or data.get("font_hint")
-                        if font_cand:
-                            detected_font = clean_font_name(str(font_cand))
-                        self._clean_thai_in_blocks(data["blocks"])
-                        text = json.dumps(data, ensure_ascii=False)
-                except Exception:
-                    is_valid_json = False
-
-                if not is_valid_json:
-                    # ตรวจจับแท็ก [FONT: ...] กรณีหลุดมาเป็นข้อความธรรมดา
-                    font_match = re.search(r"\[FONT:\s*([^\]]+)\]", text)
-                    if font_match:
-                        raw_font = font_match.group(1).strip()
-                        detected_font = clean_font_name(raw_font)
-                        text = re.sub(r"\[FONT:\s*[^\]]+\]\n?", "", text).strip()
-                    text = clean_thai_ocr_text(text)
+                # ตรวจสอบและ Normalize ผลลัพธ์ Structural JSON ทุกรูปแบบ (Object, Array, Nested)
+                is_valid_json, normalized_data, detected_font_cand = unwrap_gemini_json(text)
+                if is_valid_json and normalized_data:
+                    if detected_font_cand:
+                        detected_font = detected_font_cand
+                    self._clean_thai_in_blocks(normalized_data["blocks"])
+                    text = json.dumps(normalized_data, ensure_ascii=False)
+                else:
+                    # หากไม่ใช่ JSON ที่สมบูรณ์ ให้ตรวจสอบว่ามีรหัส JSON ปนเปื้อนหรือไม่ (Anti-leak guard)
+                    if is_raw_json_code(text):
+                        logger.warning(f"[Page {page_num + 1}] ตรวจพบโค้ด JSON หลุดจากโมเดล ทำการสกัดเฉพาะข้อความจริง...")
+                        clean_lines = fallback_extract_text_from_broken_json(text)
+                        text = "\n\n".join(clean_lines)
+                    else:
+                        font_match = re.search(r"\[FONT:\s*([^\]]+)\]", text)
+                        if font_match:
+                            raw_font = font_match.group(1).strip()
+                            detected_font = clean_font_name(raw_font)
+                            text = re.sub(r"\[FONT:\s*[^\]]+\]\n?", "", text).strip()
+                        text = clean_thai_ocr_text(text)
 
                 return text.strip(), model_name, detected_font
 

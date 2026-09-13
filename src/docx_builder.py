@@ -238,27 +238,99 @@ class DocxBuilder:
 
         images_queue = list(images) if images else []
 
-        # 1. ตรวจสอบว่าเนื้อหาเป็น Structural Layout JSON หรือไม่
-        is_json = False
-        raw_str = (markdown_text or "").strip()
-        # ตัด markdown code block wrapper ```json ... ``` ออกหากมี
-        if raw_str.startswith("```"):
-            raw_str = re.sub(r"^```(?:json)?\s*", "", raw_str)
-            raw_str = re.sub(r"\s*```$", "", raw_str).strip()
+        # 1. ตรวจสอบและแปลง Structural Layout JSON (รองรับทั้ง Single Object, Array [...], และ Nested)
+        blocks, page_type = self._parse_json_blocks(markdown_text)
+        if blocks:
+            self._render_structural_blocks(blocks, images_queue, page_type=page_type)
+        else:
+            # 2. ป้องกัน JSON รั่วไหล (Anti-Leak Guard):
+            # หากข้อความเป็นโค้ด JSON ที่ชำรุด ห้ามส่งให้ _render_markdown_lines บรรทัดต่อบรรทัดเด็ดขาด
+            if self._is_raw_json_code(markdown_text):
+                logger.warning(f"[Page {page_num}] ตรวจพบโค้ด JSON ไม่สมบูรณ์ กำลังสกัดเฉพาะข้อความเพื่อป้องกันโค้ดหลุดลง Word")
+                safe_lines = self._extract_text_lines_from_broken_json(markdown_text)
+                self._render_markdown_lines(safe_lines, images_queue)
+            else:
+                self._render_markdown_lines(markdown_text.splitlines(), images_queue)
 
-        if raw_str.startswith("{") and raw_str.endswith("}"):
-            try:
-                data = json.loads(raw_str)
-                if isinstance(data, dict) and "blocks" in data and isinstance(data["blocks"], list):
-                    self._render_structural_blocks(data["blocks"], images_queue, page_type=data.get("page_type", "document"))
-                    is_json = True
-            except Exception as e:
-                logger.warning(f"JSON layout parsing failed, falling back to markdown: {e}")
-                is_json = False
+    def _parse_json_blocks(self, text: str) -> Tuple[Optional[List[dict]], str]:
+        """
+        พยายามถอดรหัสและแปลงข้อความเป็น Structural Blocks:
+        - รองรับ Single Object: {"page_type": "...", "blocks": [...]}
+        - รองรับ Array of Object: [{"page_type": "...", "blocks": [...]}]
+        - รองรับ Array of Blocks: [{"type": "table", ...}, {"type": "paragraph", ...}]
+        - รองรับ Markdown code block ```json ... ```
+        - ซ่อมแซม trailing commas และข้อความนอก JSON อัตโนมัติ
+        """
+        if not text:
+            return None, "document"
+        clean_str = text.strip()
+        if clean_str.startswith("```"):
+            clean_str = re.sub(r"^```(?:json)?\s*", "", clean_str)
+            clean_str = re.sub(r"\s*```$", "", clean_str).strip()
 
-        if not is_json:
-            # 2. ทำงานด้วย Markdown Line Parser เดิม (Backward Compatibility 100%)
-            self._render_markdown_lines(markdown_text.splitlines(), images_queue)
+        data = None
+        try:
+            data = json.loads(clean_str)
+        except Exception:
+            for open_ch, close_ch in [("{", "}"), ("[", "]")]:
+                first_i = clean_str.find(open_ch)
+                last_i = clean_str.rfind(close_ch)
+                if first_i != -1 and last_i != -1 and last_i > first_i:
+                    sub = clean_str[first_i : last_i + 1]
+                    try:
+                        data = json.loads(sub)
+                        break
+                    except Exception:
+                        sub_fixed = re.sub(r",\s*([\}\]])", r"\1", sub)
+                        try:
+                            data = json.loads(sub_fixed)
+                            break
+                        except Exception:
+                            pass
+
+        if data is None:
+            return None, "document"
+
+        if isinstance(data, list):
+            if not data:
+                return None, "document"
+            if isinstance(data[0], dict) and "blocks" in data[0] and isinstance(data[0]["blocks"], list):
+                return data[0]["blocks"], data[0].get("page_type", "document")
+            if any(isinstance(x, dict) and "type" in x for x in data):
+                return [x for x in data if isinstance(x, dict)], "document"
+        elif isinstance(data, dict):
+            if "blocks" in data and isinstance(data["blocks"], list):
+                return data["blocks"], data.get("page_type", "document")
+            for val in data.values():
+                if isinstance(val, dict) and "blocks" in val and isinstance(val["blocks"], list):
+                    return val["blocks"], val.get("page_type", "document")
+
+        return None, "document"
+
+    def _is_raw_json_code(self, text: str) -> bool:
+        """ตรวจสอบว่าข้อความดูเหมือนเป็นโค้ด JSON ที่ไม่สมบูรณ์หรือไม่ เพื่อป้องกันไม่ให้นำไปเรนเดอร์เป็นย่อหน้าใน Word"""
+        if not text:
+            return False
+        s = text.strip()
+        if (s.startswith("{") or s.startswith("[")) and (
+            '"type":' in s or '"blocks":' in s or '"cells":' in s or '"rows":' in s
+        ):
+            return True
+        if '"type": "table"' in s or '"type": "paragraph"' in s or '"col_widths_pct"' in s:
+            return True
+        return False
+
+    def _extract_text_lines_from_broken_json(self, text: str) -> List[str]:
+        """สกัดเฉพาะเนื้อหาข้อความจาก JSON ที่ชำรุด แทนที่จะปล่อยให้โค้ด JSON หลุดลงหน้าเอกสาร"""
+        from .gemini_extractor import clean_thai_ocr_text
+        lines = []
+        matches = re.findall(r'"text"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+        for m in matches:
+            val = m.replace('\\"', '"').replace('\\n', '\n').replace('\\t', ' ').strip()
+            val = clean_thai_ocr_text(val)
+            if val and not self._is_raw_json_code(val):
+                lines.append(val)
+        return lines
 
     def _render_structural_blocks(self, blocks: list, images_queue: List[ExtractedImage], page_type: str = "document"):
         """เรนเดอร์เนื้อหาจาก Structural Layout Blocks ที่มีสัดส่วนความกว้าง-สูง และการรวมเซลล์แบบแม่นยำ"""
@@ -505,6 +577,8 @@ class DocxBuilder:
                 continue
 
             if not line_str:
+                r_empty = p.add_run("")
+                set_run_font(r_empty, self.font_name, size_pt=font_size)
                 continue
 
             self._add_formatted_text_to_paragraph(p, line_str, size_pt=font_size, bold=bold, color_rgb=color_rgb)
