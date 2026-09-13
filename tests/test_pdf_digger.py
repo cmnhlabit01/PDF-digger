@@ -827,6 +827,177 @@ class TestPDFDigger(unittest.TestCase):
 
         print("✅ ทดสอบ GeminiExtractor Thai OCR Cleaner in JSON Blocks สำเร็จ")
 
+    def test_auto_page_size_and_orientation_detection(self):
+        """ทดสอบการตรวจจับและปรับขนาดหน้ากระดาษตามต้นฉบับ (US Letter, Landscape, Thermal Label 4x6)"""
+        builder = DocxBuilder()
+
+        # หน้าที่ 1: US Letter แนวตั้ง (612.0 x 792.0 pt = 8.5 x 11.0 in)
+        builder.add_page_content(
+            markdown_text="# หน้า 1: US Letter",
+            page_num=1,
+            is_first_page=True,
+            page_width_pt=612.0,
+            page_height_pt=792.0,
+        )
+
+        # หน้าที่ 2: A4 แนวนอน (841.9 x 595.3 pt = 11.69 x 8.27 in)
+        builder.add_page_content(
+            markdown_text="# หน้า 2: A4 Landscape",
+            page_num=2,
+            is_first_page=False,
+            page_width_pt=841.9,
+            page_height_pt=595.3,
+        )
+
+        # หน้าที่ 3: ฉลากกล่องพัสดุ 4x6 นิ้ว (288.0 x 432.0 pt) ขอบกระดาษประหยัด 0.25 in
+        builder.add_page_content(
+            markdown_text="# หน้า 3: Thermal Label 4x6 in",
+            page_num=3,
+            is_first_page=False,
+            page_width_pt=288.0,
+            page_height_pt=432.0,
+        )
+
+        out_path = self.test_dir / "test_multisize_output.docx"
+        builder.save(out_path)
+        self.assertTrue(out_path.exists())
+
+        doc = docx.Document(str(out_path))
+        self.assertEqual(len(doc.sections), 3)
+
+        # ตรวจสอบ Section 1 (US Letter)
+        sec1 = doc.sections[0]
+        self.assertAlmostEqual(sec1.page_width.pt, 612.0, places=1)
+        self.assertAlmostEqual(sec1.page_height.pt, 792.0, places=1)
+        self.assertEqual(sec1.orientation, docx.enum.section.WD_ORIENT.PORTRAIT)
+        self.assertAlmostEqual(sec1.left_margin.inches, 0.5, places=2)
+
+        # ตรวจสอบ Section 2 (A4 Landscape)
+        sec2 = doc.sections[1]
+        self.assertAlmostEqual(sec2.page_width.pt, 841.9, places=1)
+        self.assertAlmostEqual(sec2.page_height.pt, 595.3, places=1)
+        self.assertEqual(sec2.orientation, docx.enum.section.WD_ORIENT.LANDSCAPE)
+
+        # ตรวจสอบ Section 3 (Thermal Label 4x6)
+        sec3 = doc.sections[2]
+        self.assertAlmostEqual(sec3.page_width.pt, 288.0, places=1)
+        self.assertAlmostEqual(sec3.page_height.pt, 432.0, places=1)
+        self.assertEqual(sec3.orientation, docx.enum.section.WD_ORIENT.PORTRAIT)
+        self.assertAlmostEqual(sec3.left_margin.inches, 0.25, places=2)
+
+        print("✅ ทดสอบ Auto Page Size & Orientation Detection (Letter, Landscape, 4x6 Label) สำเร็จ")
+
+    def test_header_and_footer_extraction_and_rendering(self):
+        """ทดสอบการแยกส่วนและเรนเดอร์ Header และ Footer ลงใน Word Section โดยตรง"""
+        # 1. ทดสอบผ่าน Structural Layout JSON
+        builder_json = DocxBuilder()
+        json_content = json.dumps({
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": "โรงพยาบาลศิริราช | ศูนย์วิจัยการแพทย์",
+                    "align": "right",
+                },
+                {
+                    "type": "paragraph",
+                    "text": "เนื้อหาหลักของเอกสารทางการแพทย์...",
+                },
+                {
+                    "type": "footer",
+                    "text": "หน้าที่ 1 / 10",
+                    "align": "center",
+                    "is_page_number": True,
+                },
+            ]
+        }, ensure_ascii=False)
+
+        builder_json.add_page_content(
+            markdown_text=json_content,
+            page_num=1,
+            is_first_page=True,
+            page_width_pt=595.3,
+            page_height_pt=841.9,
+        )
+
+        out_json_path = self.test_dir / "test_header_footer_json.docx"
+        builder_json.save(out_json_path)
+        self.assertTrue(out_json_path.exists())
+
+        doc_json = docx.Document(str(out_json_path))
+        sec_json = doc_json.sections[0]
+
+        # ตรวจสอบ Header
+        header_text = "".join(p.text for p in sec_json.header.paragraphs)
+        self.assertIn("โรงพยาบาลศิริราช", header_text)
+
+        # ตรวจสอบ Footer
+        footer_text = "".join(p.text for p in sec_json.footer.paragraphs)
+        self.assertIn("หน้าที่", footer_text)
+
+        # ตรวจสอบว่าใน Footer มี dynamic field <w:fldSimple w:instr="PAGE"/>
+        footer_xml = "".join(p._p.xml for p in sec_json.footer.paragraphs)
+        self.assertIn("PAGE", footer_xml)
+
+        # ตรวจสอบว่าใน Body ไม่มีข้อความ Header ปะปน
+        body_text = "".join(p.text for p in doc_json.paragraphs)
+        self.assertNotIn("โรงพยาบาลศิริราช", body_text)
+        self.assertIn("เนื้อหาหลักของเอกสาร", body_text)
+
+        # 2. ทดสอบผ่าน Markdown Line Tags ([HEADER], [FOOTER])
+        builder_md = DocxBuilder()
+        md_content = (
+            "[HEADER]ภาควิชาอายุรศาสตร์[/HEADER]\n"
+            "เนื้อหาบทความวิชาการ\n"
+            "[FOOTER]Page 1 of 10[/FOOTER]\n"
+        )
+        builder_md.add_page_content(
+            markdown_text=md_content,
+            page_num=1,
+            is_first_page=True,
+            page_width_pt=595.3,
+            page_height_pt=841.9,
+        )
+
+        out_md_path = self.test_dir / "test_header_footer_md.docx"
+        builder_md.save(out_md_path)
+        self.assertTrue(out_md_path.exists())
+
+        doc_md = docx.Document(str(out_md_path))
+        sec_md = doc_md.sections[0]
+        self.assertIn("ภาควิชาอายุรศาสตร์", "".join(p.text for p in sec_md.header.paragraphs))
+        self.assertIn("Page", "".join(p.text for p in sec_md.footer.paragraphs))
+
+        print("✅ ทดสอบ Header & Footer Extraction & Dynamic Page Number Rendering สำเร็จ")
+
+    def test_pdf_processor_page_dimensions_and_hints(self):
+        """ทดสอบการสกัดความกว้าง ความสูง และ Header/Footer Hints จากเอกสาร PDF จริง"""
+        import pymupdf
+        # สร้าง PDF ตัวอย่างที่มีขนาด US Letter และมีข้อความบนสุดและล่างสุด
+        pdf_path = self.test_dir / "sample_letter_doc.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page(width=612.0, height=792.0)  # US Letter
+        # ใส่ข้อความใน Header Zone (y < 54 pt)
+        page.insert_text((72, 36), "CONFIDENTIAL REPORT - COMPANY A", fontsize=10)
+        # ใส่ข้อความใน Body Zone
+        page.insert_text((72, 200), "This is main document body content.", fontsize=12)
+        # ใส่ข้อความใน Footer Zone (y > 738 pt)
+        page.insert_text((72, 756), "Page 1 of 1 | All rights reserved", fontsize=9)
+        doc.save(str(pdf_path))
+        doc.close()
+
+        processor = PDFProcessor(pdf_path)
+        p_data = processor.process_page(0)
+
+        self.assertAlmostEqual(p_data.width_pt, 612.0, places=1)
+        self.assertAlmostEqual(p_data.height_pt, 792.0, places=1)
+        self.assertIsNotNone(p_data.header_hint)
+        self.assertIn("CONFIDENTIAL REPORT", p_data.header_hint)
+        self.assertIsNotNone(p_data.footer_hint)
+        self.assertIn("Page 1 of 1", p_data.footer_hint)
+
+        print("✅ ทดสอบ PDFProcessor Dimensions & Geometric Header/Footer Hints สำเร็จ")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -190,6 +190,8 @@ class PDFToWordPipeline:
                 p_idx,
                 target_language=eff_lang,
                 vector_tables=getattr(p_data, "vector_tables", None),
+                header_hint=getattr(p_data, "header_hint", None),
+                footer_hint=getattr(p_data, "footer_hint", None),
             )
             return (p_idx, p_data, md_text, m_used, p_font)
 
@@ -270,6 +272,8 @@ class PDFToWordPipeline:
                 page_num=p_num,
                 images=p_data.embedded_images,
                 is_first_page=(p_idx == 0),
+                page_width_pt=getattr(p_data, "width_pt", None),
+                page_height_pt=getattr(p_data, "height_pt", None),
             )
 
             page_results.append(

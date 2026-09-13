@@ -121,15 +121,44 @@ class DocxBuilder:
             self._setup_document_styles()
 
     def _setup_document_styles(self):
-        """ตั้งค่าหน้ากระดาษ A4 ขอบกระดาษ 0.5 นิ้ว และระยะบรรทัดภาษาไทยให้กระชับลงตัว"""
-        # กำหนดขนาดกระดาษเป็น A4 มาตรฐาน (210 x 297 mm) และขอบ 0.5 นิ้ว
+        """ตั้งค่าหน้ากระดาษ A4 เริ่มต้น ขอบกระดาษ 0.5 นิ้ว และระยะบรรทัดภาษาไทยให้กระชับลงตัว"""
         for section in self.doc.sections:
-            section.page_width = Inches(8.27)
-            section.page_height = Inches(11.69)
+            self._apply_page_dimensions(section, 595.3, 841.9)
+
+    def _apply_page_dimensions(self, section, width_pt: float, height_pt: float):
+        """กำหนดขนาดหน้ากระดาษ ทิศทาง และขอบกระดาษที่เหมาะสมสำหรับ Section"""
+        section.page_width = Pt(width_pt)
+        section.page_height = Pt(height_pt)
+
+        # กำหนดทิศทางกระดาษ (Landscape vs Portrait)
+        if width_pt > height_pt:
+            section.orientation = docx.enum.section.WD_ORIENT.LANDSCAPE
+        else:
+            section.orientation = docx.enum.section.WD_ORIENT.PORTRAIT
+
+        # กำหนดขอบกระดาษอย่างชาญฉลาด (Smart Margins)
+        # หากเป็นฉลาก/ใบเสร็จขนาดเล็ก (กว้าง < 350 pt หรือ ~4.8 นิ้ว) ใช้ขอบ 0.25 นิ้วเพื่อประหยัดพื้นที่
+        if width_pt < 350:
+            section.top_margin = Inches(0.25)
+            section.bottom_margin = Inches(0.25)
+            section.left_margin = Inches(0.25)
+            section.right_margin = Inches(0.25)
+        else:
             section.top_margin = Inches(0.5)
             section.bottom_margin = Inches(0.5)
             section.left_margin = Inches(0.5)
             section.right_margin = Inches(0.5)
+
+    def _get_current_printable_width_in(self) -> float:
+        """คำนวณพื้นที่พิมพ์จริงแนวนอน (ความกว้างหน้ากระดาษ - ขอบซ้ายขวา) ของ Section ปัจจุบัน"""
+        try:
+            sec = self.doc.sections[-1]
+            w = sec.page_width.inches - sec.left_margin.inches - sec.right_margin.inches
+            if w > 1.0:
+                return round(w, 2)
+        except Exception:
+            pass
+        return 7.27
 
         # สไตล์ Normal
         style_normal = self.doc.styles["Normal"]
@@ -179,13 +208,33 @@ class DocxBuilder:
         page_num: int,
         images: Optional[List[ExtractedImage]] = None,
         is_first_page: bool = False,
+        page_width_pt: Optional[float] = None,
+        page_height_pt: Optional[float] = None,
     ):
         """
         แปลงเนื้อหาของหนึ่งหน้าลงในเอกสาร Word (รองรับทั้ง Structural Layout JSON และ Markdown)
-        พร้อมแทรกรูปภาพที่สกัดได้จากหน้านั้นๆ และจัดรูปแบบตำแหน่งตามต้นฉบับบนหน้ากระดาษ A4
+        พร้อมแทรกรูปภาพที่สกัดได้จากหน้านั้นๆ ปรับขนาดหน้ากระดาษตามต้นฉบับ และแยก Header/Footer อัตโนมัติ
         """
-        if not is_first_page:
-            self.doc.add_page_break()
+        if is_first_page:
+            if page_width_pt and page_height_pt:
+                self._apply_page_dimensions(self.doc.sections[0], page_width_pt, page_height_pt)
+        else:
+            curr_sec = self.doc.sections[-1]
+            needs_new_section = False
+            if page_width_pt and page_height_pt:
+                prev_w = curr_sec.page_width.pt
+                prev_h = curr_sec.page_height.pt
+                # หากขนาดต่างกันมากกว่า 2 pt หรือทิศทางเปลี่ยน ให้เปิด Section ใหม่
+                if abs(prev_w - page_width_pt) > 2.0 or abs(prev_h - page_height_pt) > 2.0:
+                    needs_new_section = True
+
+            if needs_new_section:
+                new_sec = self.doc.add_section(docx.enum.section.WD_SECTION.NEW_PAGE)
+                self._apply_page_dimensions(new_sec, page_width_pt, page_height_pt)
+                new_sec.header.is_linked_to_previous = False
+                new_sec.footer.is_linked_to_previous = False
+            else:
+                self.doc.add_page_break()
 
         images_queue = list(images) if images else []
 
@@ -261,6 +310,10 @@ class DocxBuilder:
                 if images_queue:
                     img = images_queue.pop(0)
                     self._insert_image(img)
+            elif b_type == "header":
+                self._render_header_block(block)
+            elif b_type == "footer":
+                self._render_footer_block(block)
 
     def _create_structural_table(
         self,
@@ -283,7 +336,7 @@ class DocxBuilder:
         if num_cols == 0 or num_rows == 0:
             return
 
-        total_page_width_in = 7.27  # A4 width (8.27 in) - 2 * 0.5 in margins
+        total_page_width_in = self._get_current_printable_width_in()
         raw_widths = table_block.get("col_widths_pct") or []
         if raw_widths and len(raw_widths) == num_cols:
             total_w = sum(raw_widths)
@@ -456,6 +509,99 @@ class DocxBuilder:
 
             self._add_formatted_text_to_paragraph(p, line_str, size_pt=font_size, bold=bold, color_rgb=color_rgb)
 
+    def _render_header_block(self, block: dict):
+        """บรรจุเนื้อหาหัวกระดาษลงใน Section Header ของ Word โดยตรง"""
+        text = str(block.get("text", "")).strip()
+        if not text:
+            return
+        sec = self.doc.sections[-1]
+        existing_text = "".join(p.text for p in sec.header.paragraphs).strip()
+        if existing_text == text:
+            return
+
+        header = sec.header
+        header.is_linked_to_previous = False
+        p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+        p.text = ""
+        align = str(block.get("align", "left")).lower()
+        if "center" in align:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        elif "right" in align:
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        else:
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(2)
+        font_sz = max(8.5, min(10.5, self.font_sizes["body"] - 4.0))
+        self._add_formatted_text_to_paragraph(p, text, size_pt=font_sz, bold=bool(block.get("bold", False)))
+
+    def _render_footer_block(self, block: dict):
+        """บรรจุเนื้อหาท้ายกระดาษ/เลขหน้าลงใน Section Footer ของ Word โดยตรง"""
+        text = str(block.get("text", "")).strip()
+        if not text:
+            return
+        sec = self.doc.sections[-1]
+        existing_text = "".join(p.text for p in sec.footer.paragraphs).strip()
+        if existing_text == text:
+            return
+
+        footer = sec.footer
+        footer.is_linked_to_previous = False
+        p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        p.text = ""
+        align = str(block.get("align", "center")).lower()
+        if "right" in align:
+            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        elif "left" in align:
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        else:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        p.paragraph_format.space_before = Pt(2)
+        p.paragraph_format.space_after = Pt(0)
+        font_sz = max(8.5, min(10.0, self.font_sizes["body"] - 4.5))
+
+        is_page_number = bool(block.get("is_page_number", False))
+        self._render_footer_text(p, text, font_sz, is_page_number)
+
+    def _render_footer_text(self, p, text: str, font_sz: float, is_page_number: bool):
+        """เรนเดอร์ข้อความท้ายกระดาษ พร้อมรองรับหมายเลขหน้าแบบ Dynamic Word Field (<w:fldSimple w:instr="PAGE"/>)"""
+        page_pattern = r"(หน้า(?:ที่)?\s*)\d+(\s*/\s*\d+)?"
+        page_en_pattern = r"(Page\s*)\d+(\s*(?:of|/)\s*\d+)?"
+
+        m_th = re.search(page_pattern, text, flags=re.IGNORECASE)
+        m_en = re.search(page_en_pattern, text, flags=re.IGNORECASE)
+
+        if m_th or m_en or is_page_number:
+            match = m_th or m_en
+            if match:
+                prefix = text[:match.start()]
+                p_label = match.group(1)
+                suffix_total = match.group(2) or ""
+                remainder = text[match.end():]
+
+                if prefix:
+                    self._add_formatted_text_to_paragraph(p, prefix, size_pt=font_sz)
+
+                r1 = p.add_run(p_label)
+                set_run_font(r1, self.font_name, font_sz)
+
+                r_num = p.add_run()
+                set_run_font(r_num, self.font_name, font_sz)
+                fld = parse_xml(f'<w:fldSimple {nsdecls("w")} w:instr="PAGE"/>')
+                r_num._r.append(fld)
+
+                if suffix_total:
+                    r_tot = p.add_run(suffix_total)
+                    set_run_font(r_tot, self.font_name, font_sz)
+
+                if remainder:
+                    self._add_formatted_text_to_paragraph(p, remainder, size_pt=font_sz)
+                return
+
+        self._add_formatted_text_to_paragraph(p, text, size_pt=font_sz)
+
     def _render_markdown_lines(self, lines: List[str], images_queue: List[ExtractedImage]):
         """เรนเดอร์เอกสารตามบรรทัด Markdown แบบเดิม (Legacy Fallback)"""
         i = 0
@@ -464,6 +610,18 @@ class DocxBuilder:
 
             # 1. บรรทัดว่าง
             if not raw_line:
+                i += 1
+                continue
+
+            # 1.1 ตรวจสอบแท็ก [HEADER] หรือ [FOOTER]
+            if "[HEADER]" in raw_line.upper():
+                hdr_text = re.sub(r"\[/?HEADER\]", "", raw_line, flags=re.IGNORECASE).strip()
+                self._render_header_block({"text": hdr_text, "align": "left"})
+                i += 1
+                continue
+            if "[FOOTER]" in raw_line.upper():
+                ftr_text = re.sub(r"\[/?FOOTER\]", "", raw_line, flags=re.IGNORECASE).strip()
+                self._render_footer_block({"text": ftr_text, "align": "center"})
                 i += 1
                 continue
 
@@ -703,7 +861,7 @@ class DocxBuilder:
         set_table_margins(table, top=40, bottom=40, left=80, right=80)
 
         # คำนวณความกว้างคอลัมน์แบบสัดส่วนตามเนื้อหาจริง (Smart Proportional Column Widths)
-        total_page_width_in = 7.25
+        total_page_width_in = self._get_current_printable_width_in()
         col_weights = []
         for col_idx in range(num_cols):
             col_cells = [r[col_idx] for r in parsed_rows if col_idx < len(r)]

@@ -62,6 +62,10 @@ class PDFPageData:
     embedded_images: List[ExtractedImage]
     has_text: bool
     vector_tables: Optional[List[dict]] = None
+    width_pt: Optional[float] = None
+    height_pt: Optional[float] = None
+    header_hint: Optional[str] = None
+    footer_hint: Optional[str] = None
 
 
 class PDFProcessor:
@@ -100,6 +104,10 @@ class PDFProcessor:
         if self.is_image:
             # กรณีไฟล์ต้นทางเป็นรูปภาพโดยตรง (.png, .jpg, .webp ฯลฯ)
             with Image.open(self.file_path) as img:
+                orig_w, orig_h = img.size
+                width_pt = round(orig_w * 72.0 / self.dpi, 1)
+                height_pt = round(orig_h * 72.0 / self.dpi, 1)
+
                 if img.mode in ("RGBA", "P"):
                     img_rgb = img.convert("RGB")
                 elif img.mode != "RGB":
@@ -126,6 +134,8 @@ class PDFProcessor:
                     rendered_image_bytes=rendered_bytes,
                     embedded_images=[],
                     has_text=False,
+                    width_pt=width_pt,
+                    height_pt=height_pt,
                 )
 
         # กรณีไฟล์ต้นทางเป็น PDF
@@ -134,10 +144,39 @@ class PDFProcessor:
                 raise IndexError(f"หมายเลขหน้า {page_num} อยู่นอกช่วง (มีทั้งหมด {len(doc)} หน้า)")
 
             page = doc[page_num]
+            p_width_pt = round(page.rect.width, 1)
+            p_height_pt = round(page.rect.height, 1)
 
-            # 1. ตรวจสอบว่าหน้านี้มีข้อความแบบ digital หรือไม่
+            # 1. ตรวจสอบว่าหน้านี้มีข้อความแบบ digital หรือไม่ พร้อมตรวจจับ Header/Footer พื้นที่บน-ล่าง
             raw_text = page.get_text()
             has_text = len(raw_text.strip()) > 0
+            header_hint = None
+            footer_hint = None
+
+            try:
+                blocks = page.get_text("blocks")
+                header_candidates = []
+                footer_candidates = []
+                for b in blocks:
+                    # b format: (x0, y0, x1, y1, text, block_no, block_type)
+                    if len(b) >= 7 and b[6] == 0:  # text block
+                        txt = b[4].strip()
+                        if not txt:
+                            continue
+                        y0, y1 = b[1], b[3]
+                        # Top zone: y0 < 54 pt (0.75 นิ้วจากขอบบน)
+                        if y0 < 54:
+                            header_candidates.append(txt.replace("\n", " "))
+                        # Bottom zone: y1 > p_height_pt - 54 pt (0.75 นิ้วจากขอบล่าง)
+                        elif y1 > p_height_pt - 54:
+                            footer_candidates.append(txt.replace("\n", " "))
+
+                if header_candidates:
+                    header_hint = " | ".join(header_candidates)
+                if footer_candidates:
+                    footer_hint = " | ".join(footer_candidates)
+            except Exception:
+                pass
 
             # 2. เรนเดอร์หน้าเป็นภาพความละเอียดสูง 200 DPI (JPEG 92% คมชัดสูง ไฟล์เล็ก อัปโหลดเร็วขึ้น 10 เท่า)
             zoom = self.dpi / 72.0
@@ -176,6 +215,10 @@ class PDFProcessor:
                 embedded_images=embedded_images,
                 has_text=has_text,
                 vector_tables=vector_tables,
+                width_pt=p_width_pt,
+                height_pt=p_height_pt,
+                header_hint=header_hint,
+                footer_hint=footer_hint,
             )
 
     def _extract_images_from_page(

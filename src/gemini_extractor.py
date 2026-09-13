@@ -61,6 +61,17 @@ SYSTEM_PROMPT = """คุณคือระบบ OCR, Precision Layout Reconstr
 5. บล็อกรูปภาพ ("type": "image"):
    - ใช้เมื่อมีภาพประกอบ แผนภูมิ กราฟ หรือโลโก้อยู่นอกตาราง
 
+6. บล็อกหัวกระดาษ ("type": "header"):
+   - ใช้เฉพาะเมื่อเอกสารมีหัวกระดาษ (Running Header) ด้านบนสุดของหน้ากระดาษ (เช่น ชื่อเอกสาร, รหัสโครงการ, โลโก้บนหัวกระดาษ)
+   - "text": ข้อความหัวกระดาษ
+   - "align": "left", "center", หรือ "right"
+
+7. บล็อกท้ายกระดาษ ("type": "footer"):
+   - ใช้เฉพาะเมื่อเอกสารมีท้ายกระดาษ (Running Footer) ด้านล่างสุดของหน้ากระดาษ (เช่น หมายเลขหน้า "หน้า 1", วันที่พิมพ์, ข้อความสงวนลิขสิทธิ์, รหัสเอกสาร)
+   - "text": ข้อความท้ายกระดาษ
+   - "align": "left", "center", หรือ "right"
+   - "is_page_number": true หากมีข้อความระบุหมายเลขหน้า
+
 กฎเหล็กสำคัญ:
 1. ความถูกต้องของภาษาไทย (Strict Accuracy):
    - ห้ามสรุปความ ห้ามตัดทอน ห้ามแต่งเติมเด็ดขาด
@@ -166,6 +177,8 @@ class GeminiExtractor:
         page_num: int,
         target_language: Optional[str] = "original",
         vector_tables: Optional[List[dict]] = None,
+        header_hint: Optional[str] = None,
+        footer_hint: Optional[str] = None,
     ) -> Tuple[str, str, Optional[str]]:
         """
         ประมวลผลภาพหน้า PDF/Image โดยส่งให้ Gemini อ่านข้อความ ตาราง สังเกตฟอนต์ และแปลภาษา (ถ้ามี)
@@ -199,15 +212,21 @@ class GeminiExtractor:
                 tab_summaries.append(f"ตารางที่ {i+1}: {r_cnt} แถว x {c_cnt} คอลัมน์ (กว้าง {w_pt}pt x สูง {h_pt}pt)")
             vec_hint = f" (ข้อมูลเวกเตอร์ตรวจพบ: {', '.join(tab_summaries)} ให้ถอดแบบตาราง 'type': 'table' ตามสัดส่วนและเส้นแบ่งจริงนี้)"
 
+        hf_hint = ""
+        if header_hint:
+            hf_hint += f" (ตรวจพบข้อความส่วนหัวกระดาษ: {header_hint} หากเป็น Running Header ให้ใช้ 'type': 'header')"
+        if footer_hint:
+            hf_hint += f" (ตรวจพบข้อความส่วนท้ายกระดาษ: {footer_hint} ให้ใช้ 'type': 'footer')"
+
         if trans_inst:
             prompt = (
-                f"นี่คือหน้า {page_num + 1} ของเอกสาร กรุณาวิเคราะห์และสร้างผลลัพธ์เป็น Structured Layout JSON {trans_inst}{vec_hint} "
+                f"นี่คือหน้า {page_num + 1} ของเอกสาร กรุณาวิเคราะห์และสร้างผลลัพธ์เป็น Structured Layout JSON {trans_inst}{vec_hint}{hf_hint} "
                 f"โดยรักษาความถูกต้องของข้อความ สัดส่วนคอลัมน์ตาราง [col_widths_pct] การจัดวาง และรูปภาพ [IMAGE] ไว้อย่างสมบูรณ์ตาม Schema"
             )
         else:
             prompt = (
-                f"นี่คือหน้า {page_num + 1} ของเอกสาร กรุณาวิเคราะห์และสร้างผลลัพธ์เป็น Structured Layout JSON{vec_hint} "
-                f"ระบุสัดส่วนคอลัมน์ตาราง [col_widths_pct] ความสูงแถว [height_pt] การรวมเซลล์ และรูปภาพ [IMAGE] ตาม Schema อย่างเคร่งครัด"
+                f"นี่คือหน้า {page_num + 1} ของเอกสาร กรุณาวิเคราะห์และสร้างผลลัพธ์เป็น Structured Layout JSON{vec_hint}{hf_hint} "
+                f"ระบุสัดส่วนคอลัมน์ตาราง [col_widths_pct] ความสูงแถว [height_pt] การรวมเซลล์ หัวกระดาษ [header] ท้ายกระดาษ [footer] และรูปภาพ [IMAGE] ตาม Schema อย่างเคร่งครัด"
             )
 
         mime_type = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
@@ -331,7 +350,7 @@ class GeminiExtractor:
                         for cell in row.get("cells", []):
                             if isinstance(cell, dict) and "text" in cell:
                                 cell["text"] = clean_thai_ocr_text(str(cell["text"]))
-            elif b_type in ("heading", "paragraph"):
+            elif b_type in ("heading", "paragraph", "header", "footer"):
                 if "text" in block:
                     block["text"] = clean_thai_ocr_text(str(block["text"]))
             elif b_type == "list":
