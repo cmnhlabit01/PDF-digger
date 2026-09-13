@@ -51,43 +51,22 @@ def main():
         unsafe_allow_html=True,
     )
 
+    # --- โหลด API Key จากระบบหลังบ้าน (st.secrets หรือ .env) โดยไม่แสดงใน UI ---
+    api_key = ""
+    try:
+        if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+            api_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+
+    if not api_key:
+        api_key = os.getenv("GEMINI_API_KEY", "")
+
     # --- Sidebar: การตั้งค่า ---
     with st.sidebar:
         st.header("⚙️ การตั้งค่าระบบ")
 
-        # 1. API Key (รองรับ st.secrets บน Streamlit Cloud หรือไฟล์ .env)
-        embedded_key = ""
-        try:
-            if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
-                embedded_key = st.secrets["GEMINI_API_KEY"]
-        except Exception:
-            pass
-
-        if not embedded_key:
-            embedded_key = os.getenv("GEMINI_API_KEY", "")
-
-        has_valid_key = bool(embedded_key and embedded_key != "your_gemini_api_key_here")
-
-        if has_valid_key:
-            st.success("🔒 ระบบเชื่อมต่อ Gemini AI เรียบร้อยแล้ว (พร้อมใช้งาน)")
-            with st.expander("⚙️ ต้องการเปลี่ยน API Key อื่น? (ค่าเริ่มต้นถูกฝังไว้แล้ว)"):
-                api_key_input = st.text_input(
-                    "ระบุ API Key ใหม่",
-                    value="",
-                    type="password",
-                    help="หากเว้นว่างไว้ ระบบจะใช้คีย์หลักที่ฝังไว้ในระบบ",
-                )
-                api_key = api_key_input.strip() if api_key_input.strip() else embedded_key
-        else:
-            api_key_input = st.text_input(
-                "กรอก Gemini API Key",
-                value="",
-                type="password",
-                help="รับฟรีได้จาก https://aistudio.google.com/",
-            )
-            api_key = api_key_input.strip()
-
-        # 2. แปลภาษา
+        # 1. แปลภาษา
         st.subheader("🌐 การแปลภาษา (Translation)")
         translate_dict = {
             "original": "📄 คงภาษาตามต้นฉบับ (ไม่แปล)",
@@ -104,7 +83,7 @@ def main():
             help="ระบบจะแปลเนื้อหาทั้งหมดรวมถึงตารางเป็นภาษาที่เลือกในรอบเดียวโดยยังคงโครงสร้างตารางและรูปภาพครบถ้วน",
         )
 
-        # 3. โหมดปรับความคมชัดภาพ
+        # 2. โหมดปรับความคมชัดภาพ
         st.subheader("✨ ปรับแต่งภาพสแกน (Image Enhancement)")
         enhance_image = st.checkbox(
             "เปิดโหมดเพิ่มความคมชัดพิเศษ",
@@ -112,7 +91,7 @@ def main():
             help="เหมาะสำหรับภาพสแกนกระดาษเหลือง หมึกจาง หรือภาพถ่ายจากมือถือ ระบบจะปรับ Auto-contrast และ Sharpness ให้ตัวหนังสือเด่นชัดขึ้น",
         )
 
-        # 4. แบบอักษร Word
+        # 3. แบบอักษร Word
         st.subheader("🔤 แบบอักษร Word")
         font_options = [
             "🔍 ตรวจจับจากต้นฉบับอัตโนมัติ (Auto-detect)",
@@ -130,24 +109,9 @@ def main():
             help="หากเลือก Auto-detect ระบบจะดึงฟอนต์ที่ใช้จริงจาก PDF ต้นฉบับมาใช้ใน Word ทันที",
         )
 
-        # 5. เลือกลำดับโมเดล
-        st.subheader("🤖 โมเดล AI")
-        primary_model = st.selectbox(
-            "โมเดลเริ่มต้นที่ต้องการใช้",
-            options=FALLBACK_MODELS,
-            index=0,
-            help="ระบบจะใช้โมเดลนี้ก่อน หากติด 429 Quota Exceeded จะสลับไปตัวถัดไปให้อัตโนมัติ",
-        )
-
-        st.info(
-            "🔄 **Seamless Fallback:**\n"
-            f"หากโมเดลหลักโควตาเต็ม ระบบจะสลับไป `{FALLBACK_MODELS[1]}` ➔ `{FALLBACK_MODELS[2]}` ให้อัตโนมัติทันที"
-        )
-
     # --- Main Area ---
     if not api_key or api_key == "your_gemini_api_key_here":
-        st.warning("⚠️ กรุณาระบุ **Gemini API Key** ในแถบด้านซ้ายก่อนเริ่มใช้งาน")
-        st.info("💡 คุณสามารถขอรับ Gemini API Key ฟรีได้จาก [Google AI Studio](https://aistudio.google.com/)")
+        st.error("⚠️ ไม่พบการกำหนดค่า API ในระบบหลังบ้าน กรุณาตรวจสอบการตั้งค่า GEMINI_API_KEY ใน Environment หรือ Server Secrets")
         return
 
     allowed_types = ["pdf", "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"]
@@ -209,15 +173,10 @@ def main():
         start_btn = st.button(btn_label, type="primary", use_container_width=True)
 
         if start_btn:
-            # จัดเตรียมลำดับโมเดลตามที่เลือก
             models_to_use = FALLBACK_MODELS.copy()
-            if primary_model in models_to_use:
-                models_to_use.remove(primary_model)
-            models_to_use.insert(0, primary_model)
 
             progress_bar = st.progress(0)
             status_text = st.empty()
-            fallback_alerts = st.empty()
 
             is_auto_font = font_choice.startswith("🔍")
             target_font = None if is_auto_font else font_choice
@@ -251,14 +210,12 @@ def main():
                 st.balloons()
 
                 # สรุปผล
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3 = st.columns(3)
                 with c1:
                     st.metric("หน้าที่สำเร็จ", f"{report.successful_pages}/{report.total_pages} หน้า")
                 with c2:
                     st.metric("รูปภาพที่แทรก", f"{report.total_images_extracted} รูป")
                 with c3:
-                    st.metric("โมเดลที่ใช้", ", ".join(report.models_used))
-                with c4:
                     font_lbl = report.applied_font
                     if report.detected_font:
                         font_lbl += " (ตรวจพบ)"
@@ -269,11 +226,6 @@ def main():
 
                 if report.enhanced:
                     st.caption("✨ ประมวลผลด้วยโหมดปรับความคมชัดพิเศษ (Enhanced Mode)")
-
-                if report.fallback_events:
-                    st.warning("⚠️ **บันทึกการสลับโมเดลสำรอง (Seamless Fallback):**")
-                    for rec in report.fallback_events:
-                        st.write(f"- {rec}")
 
                 # อ่านไฟล์ Word ที่สร้างขึ้น
                 with open(output_docx_path, "rb") as f_docx:
@@ -293,7 +245,7 @@ def main():
                 # แสดงเนื้อหาที่แกะได้แต่ละหน้า
                 with st.expander("📝 ดูข้อความและโครงสร้างที่แกะได้ (Markdown Preview)"):
                     for p_res in report.page_results:
-                        st.markdown(f"#### หน้า {p_res.page_num} (แกะด้วย {p_res.model_used})")
+                        st.markdown(f"#### หน้า {p_res.page_num}")
                         st.markdown(p_res.markdown_text)
                         st.divider()
 

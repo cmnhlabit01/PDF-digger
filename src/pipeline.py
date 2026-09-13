@@ -98,7 +98,7 @@ class PDFToWordPipeline:
             self._handle_fallback(prev_model, next_model, reason)
             if progress_callback:
                 progress_callback(
-                    1, total_pages, f"🔄 {prev_model} ({reason}) ➔ สลับไปใช้ {next_model}..."
+                    1, total_pages, "🔄 ระบบกำลังเชื่อมต่อเซิร์ฟเวอร์ประมวลผลสำรองอัตโนมัติ..."
                 )
 
         # 1. เตรียมโมดูลต่างๆ
@@ -170,7 +170,7 @@ class PDFToWordPipeline:
                     progress_callback(
                         p_idx + 1,
                         total_pages,
-                        f"กำลังอ่านและสกัดข้อมูลหน้า {p_idx + 1}/{total_pages} ด้วย {extractor.current_model}...",
+                        f"กำลังอ่านและสกัดข้อมูลหน้า {p_idx + 1}/{total_pages}...",
                     )
                 res = process_page_task(p_idx)
                 raw_results.append(res)

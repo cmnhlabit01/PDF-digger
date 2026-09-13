@@ -20,15 +20,14 @@ class PDFDiggerApp(ctk.CTk):
         super().__init__()
 
         self.title("PDF Digger - ระบบแปลง PDF / รูปภาพ เป็น Word ด้วย Gemini AI")
-        self.geometry("800x740")
-        self.minsize(720, 660)
+        self.geometry("800x640")
+        self.minsize(720, 560)
 
         self.selected_pdf: Path | None = None
         self.output_docx: Path | None = None
         self.is_converting = False
 
         self._setup_ui()
-        self._load_saved_api_key()
 
     def _setup_ui(self):
         # Grid layout configuration
@@ -104,39 +103,10 @@ class PDFDiggerApp(ctk.CTk):
 
         settings_title = ctk.CTkLabel(
             settings_card,
-            text="2. การตั้งค่าระบบ (API Key, แปลภาษา, ฟอนต์)",
+            text="2. การตั้งค่าระบบ (แปลภาษา, ฟอนต์)",
             font=ctk.CTkFont(family="Cordia New", size=18, weight="bold"),
         )
         settings_title.grid(row=0, column=0, columnspan=3, padx=16, pady=(10, 6), sticky="w")
-
-        # API Key
-        api_label = ctk.CTkLabel(
-            settings_card,
-            text="Gemini API Key:",
-            font=ctk.CTkFont(family="Cordia New", size=15),
-        )
-        api_label.grid(row=1, column=0, padx=(16, 10), pady=4, sticky="w")
-
-        self.api_key_entry = ctk.CTkEntry(
-            settings_card,
-            placeholder_text="AIzaSy... (รับฟรีได้จาก https://aistudio.google.com/)",
-            show="•",
-            height=30,
-            font=ctk.CTkFont(size=12),
-        )
-        self.api_key_entry.grid(row=1, column=1, padx=(0, 10), pady=4, sticky="ew")
-
-        save_key_btn = ctk.CTkButton(
-            settings_card,
-            text="บันทึกคีย์",
-            command=self._save_api_key,
-            width=80,
-            height=30,
-            font=ctk.CTkFont(family="Cordia New", size=14),
-            fg_color="gray30",
-            hover_color="gray40",
-        )
-        save_key_btn.grid(row=1, column=2, padx=(0, 16), pady=4)
 
         # Translation
         translate_label = ctk.CTkLabel(
@@ -144,7 +114,7 @@ class PDFDiggerApp(ctk.CTk):
             text="แปลภาษา (Translation):",
             font=ctk.CTkFont(family="Cordia New", size=15),
         )
-        translate_label.grid(row=2, column=0, padx=(16, 10), pady=4, sticky="w")
+        translate_label.grid(row=1, column=0, padx=(16, 10), pady=4, sticky="w")
 
         self.translate_map = {
             "📄 คงภาษาตามต้นฉบับ (ไม่แปล)": "original",
@@ -160,24 +130,7 @@ class PDFDiggerApp(ctk.CTk):
             font=ctk.CTkFont(size=13),
         )
         self.translate_combo.set("📄 คงภาษาตามต้นฉบับ (ไม่แปล)")
-        self.translate_combo.grid(row=2, column=1, columnspan=2, padx=(0, 16), pady=4, sticky="ew")
-
-        # Model Selection
-        model_label = ctk.CTkLabel(
-            settings_card,
-            text="โมเดลหลัก (Fallback):",
-            font=ctk.CTkFont(family="Cordia New", size=15),
-        )
-        model_label.grid(row=3, column=0, padx=(16, 10), pady=4, sticky="w")
-
-        self.model_combo = ctk.CTkComboBox(
-            settings_card,
-            values=FALLBACK_MODELS,
-            height=30,
-            font=ctk.CTkFont(size=13),
-        )
-        self.model_combo.set(FALLBACK_MODELS[0])
-        self.model_combo.grid(row=3, column=1, columnspan=2, padx=(0, 16), pady=4, sticky="ew")
+        self.translate_combo.grid(row=1, column=1, columnspan=2, padx=(0, 16), pady=4, sticky="ew")
 
         # Font Selection
         font_label = ctk.CTkLabel(
@@ -185,7 +138,7 @@ class PDFDiggerApp(ctk.CTk):
             text="แบบอักษร Word:",
             font=ctk.CTkFont(family="Cordia New", size=15),
         )
-        font_label.grid(row=4, column=0, padx=(16, 10), pady=4, sticky="w")
+        font_label.grid(row=2, column=0, padx=(16, 10), pady=4, sticky="w")
 
         font_options = [
             "🔍 ตรวจจับจากต้นฉบับอัตโนมัติ (Auto-detect)",
@@ -203,7 +156,7 @@ class PDFDiggerApp(ctk.CTk):
             font=ctk.CTkFont(size=13),
         )
         self.font_combo.set(font_options[0])
-        self.font_combo.grid(row=4, column=1, columnspan=2, padx=(0, 16), pady=4, sticky="ew")
+        self.font_combo.grid(row=2, column=1, columnspan=2, padx=(0, 16), pady=4, sticky="ew")
 
         # Image Enhancement Checkbox
         self.enhance_var = ctk.BooleanVar(value=False)
@@ -213,7 +166,7 @@ class PDFDiggerApp(ctk.CTk):
             variable=self.enhance_var,
             font=ctk.CTkFont(family="Cordia New", size=14),
         )
-        self.enhance_chk.grid(row=5, column=0, columnspan=3, padx=(16, 16), pady=(6, 10), sticky="w")
+        self.enhance_chk.grid(row=3, column=0, columnspan=3, padx=(16, 16), pady=(6, 10), sticky="w")
 
         # 4. Action & Progress Area
         action_card = ctk.CTkFrame(self, corner_radius=10)
@@ -243,15 +196,6 @@ class PDFDiggerApp(ctk.CTk):
         )
         self.status_label.pack(anchor="w", padx=16, pady=(2, 4))
 
-        # Fallback notification text
-        self.fallback_label = ctk.CTkLabel(
-            action_card,
-            text="",
-            font=ctk.CTkFont(family="Cordia New", size=14),
-            text_color="#F59E0B",
-        )
-        self.fallback_label.pack(anchor="w", padx=16, pady=(0, 8))
-
         # Action buttons frame (appear after success)
         self.result_frame = ctk.CTkFrame(action_card, fg_color="transparent")
         self.result_frame.pack(fill="x", padx=16, pady=(2, 12))
@@ -277,32 +221,6 @@ class PDFDiggerApp(ctk.CTk):
             fg_color="gray40",
             hover_color="gray50",
         )
-
-    def _load_saved_api_key(self):
-        """โหลด API Key จากไฟล์ .env หากมี"""
-        env_key = os.getenv("GEMINI_API_KEY", "")
-        if env_key and env_key != "your_gemini_api_key_here":
-            self.api_key_entry.delete(0, "end")
-            self.api_key_entry.insert(0, env_key)
-
-    def _save_api_key(self):
-        """บันทึก API Key ลงใน .env"""
-        key = self.api_key_entry.get().strip()
-        if not key:
-            messagebox.showwarning("คำเตือน", "กรุณากรอก API Key ก่อนบันทึก")
-            return
-
-        env_path = Path(".env")
-        lines = []
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                if line.startswith("GEMINI_API_KEY="):
-                    continue
-                lines.append(line)
-        lines.append(f"GEMINI_API_KEY={key}")
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.environ["GEMINI_API_KEY"] = key
-        messagebox.showinfo("สำเร็จ", "บันทึก Gemini API Key เรียบร้อยแล้ว")
 
     def _browse_pdf(self):
         file_path = filedialog.askopenfilename(
@@ -346,11 +264,11 @@ class PDFDiggerApp(ctk.CTk):
             messagebox.showwarning("แจ้งเตือน", "กรุณาเลือกไฟล์ PDF หรือไฟล์รูปภาพก่อน")
             return
 
-        api_key = self.api_key_entry.get().strip()
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key or api_key == "your_gemini_api_key_here":
-            messagebox.showwarning(
+            messagebox.showerror(
                 "แจ้งเตือน",
-                "กรุณาระบุ Gemini API Key ก่อนเริ่มใช้งาน\n(สามารถขอรับคีย์ฟรีได้ที่ https://aistudio.google.com/)",
+                "ไม่พบการตั้งค่า API Key ในระบบหลังบ้าน\nกรุณาตั้งค่า GEMINI_API_KEY ในไฟล์ .env หรือ System Environment",
             )
             return
 
@@ -358,7 +276,6 @@ class PDFDiggerApp(ctk.CTk):
         self.start_btn.configure(state="disabled")
         self.progress_bar.set(0)
         self.status_label.configure(text="กำลังเริ่มต้นกระบวนการ...", text_color="#3B82F6")
-        self.fallback_label.configure(text="")
         self.open_doc_btn.grid_forget()
         self.open_folder_btn.grid_forget()
 
@@ -367,16 +284,11 @@ class PDFDiggerApp(ctk.CTk):
         thread.start()
 
     def _run_conversion(self):
-        api_key = self.api_key_entry.get().strip()
-        primary_model = self.model_combo.get()
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        models_to_use = FALLBACK_MODELS.copy()
         font_choice = self.font_combo.get()
         target_lang = self.translate_map.get(self.translate_combo.get(), "original")
         enhance = self.enhance_var.get()
-
-        models_to_use = FALLBACK_MODELS.copy()
-        if primary_model in models_to_use:
-            models_to_use.remove(primary_model)
-        models_to_use.insert(0, primary_model)
 
         is_auto_font = font_choice.startswith("🔍")
         target_font = None if is_auto_font else font_choice
@@ -413,8 +325,6 @@ class PDFDiggerApp(ctk.CTk):
     def _update_progress_ui(self, ratio: float, current: int, total: int, msg: str):
         self.progress_bar.set(ratio)
         self.status_label.configure(text=f"⏳ [{current}/{total}] {msg}", text_color="#2563EB")
-        if "สลับ" in msg or "🔄" in msg:
-            self.fallback_label.configure(text=msg)
 
     def _on_success(self, report):
         self.is_converting = False
@@ -433,10 +343,6 @@ class PDFDiggerApp(ctk.CTk):
             f"ฟอนต์: {font_info} | รูปภาพ: {report.total_images_extracted} รูป{lang_str}{enhance_str}"
         )
         self.status_label.configure(text=success_text, text_color="#059669")
-
-        if report.fallback_events:
-            fb_text = "🔄 มีการสลับโมเดลอัตโนมัติ: " + " | ".join(report.fallback_events)
-            self.fallback_label.configure(text=fb_text)
 
         # แสดงปุ่มเปิดไฟล์
         self.open_doc_btn.grid(row=0, column=0, padx=(0, 8), sticky="ew")
