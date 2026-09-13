@@ -37,6 +37,7 @@ class ConversionReport:
     enhanced: bool = False
     fallback_events: List[str] = field(default_factory=list)
     page_results: List[PageConversionResult] = field(default_factory=list)
+    docx_bytes: Optional[bytes] = None
 
 
 class PDFToWordPipeline:
@@ -291,6 +292,10 @@ class PDFToWordPipeline:
             progress_callback(total_pages, total_pages, "กำลังบันทึกไฟล์ Word (.docx)...")
 
         builder.save(output_file)
+        try:
+            docx_bytes = builder.to_bytes()
+        except Exception:
+            docx_bytes = None
         logger.info(f"สร้างไฟล์ Word สำเร็จที่: {output_file} (ใช้ฟอนต์: {applied_font})")
 
         return ConversionReport(
@@ -306,4 +311,5 @@ class PDFToWordPipeline:
             enhanced=eff_enhance,
             fallback_events=self.fallback_events,
             page_results=page_results,
+            docx_bytes=docx_bytes,
         )

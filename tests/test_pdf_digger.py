@@ -1126,6 +1126,19 @@ class TestPDFDigger(unittest.TestCase):
 
             print("✅ ทดสอบ Cooldown Tracking & Resilient Multi-Model Fallback สำเร็จ")
 
+    def test_docx_builder_to_bytes_and_pipeline_report_bytes(self):
+        """ทดสอบการแปลงไฟล์ Word เป็น In-Memory Bytes ป้องกันข้อผิดพลาด Download Button"""
+        builder = DocxBuilder()
+        builder.add_page_content("เนื้อหาทดสอบหน่วยความจำ", 1)
+        raw_bytes = builder.to_bytes()
+
+        self.assertIsInstance(raw_bytes, bytes)
+        self.assertGreater(len(raw_bytes), 0)
+        # ตรวจสอบว่าเป็นไฟล์ ZIP / OpenXML Docx แท้ (ขึ้นต้นด้วย PK\x03\x04)
+        self.assertTrue(raw_bytes.startswith(b"PK\x03\x04"))
+
+        print("✅ ทดสอบ In-Memory Word Bytes Generation (ป้องกัน Streamlit Download Error) สำเร็จ")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -239,11 +239,18 @@ def main():
                             j["status"] = "cancelled"
                             j["message"] = "🛑 ยกเลิกการแปลงเอกสารเรียบร้อยแล้ว"
                         else:
-                            j["status"] = "completed"
-                            j["report"] = rep
-                            if j["job_output"].exists():
+                            docx_data = getattr(rep, "docx_bytes", None)
+                            if not docx_data and j["job_output"].exists():
                                 with open(j["job_output"], "rb") as f_docx:
-                                    j["docx_bytes"] = f_docx.read()
+                                    docx_data = f_docx.read()
+
+                            if docx_data and len(docx_data) > 0:
+                                j["docx_bytes"] = docx_data
+                                j["report"] = rep
+                                j["status"] = "completed"
+                            else:
+                                j["status"] = "error"
+                                j["error_msg"] = "ไม่สามารถสร้างหรืออ่านไฟล์ Word (.docx) ได้"
                     except Exception as exc:
                         if j["pipeline"].is_cancelled:
                             j["status"] = "cancelled"
@@ -329,15 +336,21 @@ def main():
                 if report.enhanced:
                     st.caption("✨ ประมวลผลด้วยโหมดปรับความคมชัดพิเศษ (Enhanced Mode)")
 
-                # ปุ่มดาวน์โหลดไฟล์ Word
-                st.download_button(
-                    label=f"📥 ดาวน์โหลดไฟล์ Word: {job['output_filename']}",
-                    data=job["docx_bytes"],
-                    file_name=job["output_filename"],
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    type="primary",
-                    use_container_width=True,
-                )
+                # ปุ่มดาวน์โหลดไฟล์ Word (ตรวจสอบความปลอดภัย ไม่ส่ง None เด็ดขาด)
+                docx_data = job.get("docx_bytes")
+                if docx_data and len(docx_data) > 0:
+                    st.download_button(
+                        label=f"📥 ดาวน์โหลดไฟล์ Word: {job['output_filename']}",
+                        data=docx_data,
+                        file_name=job["output_filename"],
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                else:
+                    st.info("⏳ กำลังเตรียมไฟล์ดาวน์โหลด...")
+                    time.sleep(0.5)
+                    st.rerun()
 
                 # แสดงเนื้อหาที่แกะได้แต่ละหน้า
                 with st.expander("📝 ดูข้อความและโครงสร้างที่แกะได้ (Markdown Preview)"):

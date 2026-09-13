@@ -1180,6 +1180,13 @@ class DocxBuilder:
             run = p.add_run(f"[ภาพประกอบ {img.image_index}]")
             set_run_font(run, self.font_name, self.font_sizes["body"], italic=True)
 
+    def to_bytes(self) -> bytes:
+        """ส่งคืนเนื้อหาเอกสาร Word ในรูปแบบ bytes จากหน่วยความจำ"""
+        import io
+        bio = io.BytesIO()
+        self.doc.save(bio)
+        return bio.getvalue()
+
     def save(self, output_path: str | Path):
         """บันทึกเอกสาร Word ลงในไฟล์เป้าหมาย"""
         path = Path(output_path)
