@@ -1,4 +1,6 @@
 import io
+import json
+import logging
 import re
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -8,6 +10,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import nsdecls, qn
 from docx.shared import Inches, Pt, RGBColor
+
+logger = logging.getLogger(__name__)
 
 from .config import (
     DEFAULT_FONT,
@@ -117,9 +121,11 @@ class DocxBuilder:
             self._setup_document_styles()
 
     def _setup_document_styles(self):
-        """ตั้งค่าสไตล์เริ่มต้นของเอกสาร ขอบกระดาษ 0.5 นิ้ว และระยะบรรทัดภาษาไทยให้กระชับลงตัว"""
-        # ปรับระยะขอบหน้ากระดาษเป็น 0.5 นิ้ว เพื่อให้พื้นที่พิมพ์กว้างขึ้น เหมาะกับฟอร์มและเอกสารทั่วไป
+        """ตั้งค่าหน้ากระดาษ A4 ขอบกระดาษ 0.5 นิ้ว และระยะบรรทัดภาษาไทยให้กระชับลงตัว"""
+        # กำหนดขนาดกระดาษเป็น A4 มาตรฐาน (210 x 297 mm) และขอบ 0.5 นิ้ว
         for section in self.doc.sections:
+            section.page_width = Inches(8.27)
+            section.page_height = Inches(11.69)
             section.top_margin = Inches(0.5)
             section.bottom_margin = Inches(0.5)
             section.left_margin = Inches(0.5)
@@ -175,16 +181,283 @@ class DocxBuilder:
         is_first_page: bool = False,
     ):
         """
-        แปลงเนื้อหา Markdown ของหนึ่งหน้าลงในเอกสาร Word
-        พร้อมแทรกรูปภาพที่สกัดได้จากหน้านั้นๆ และจัดรูปแบบตำแหน่งตามต้นฉบับ
+        แปลงเนื้อหาของหนึ่งหน้าลงในเอกสาร Word (รองรับทั้ง Structural Layout JSON และ Markdown)
+        พร้อมแทรกรูปภาพที่สกัดได้จากหน้านั้นๆ และจัดรูปแบบตำแหน่งตามต้นฉบับบนหน้ากระดาษ A4
         """
         if not is_first_page:
-            # เพิ่มการขึ้นหน้าใหม่ตามต้นฉบับ PDF
             self.doc.add_page_break()
 
         images_queue = list(images) if images else []
-        lines = markdown_text.splitlines()
 
+        # 1. ตรวจสอบว่าเนื้อหาเป็น Structural Layout JSON หรือไม่
+        is_json = False
+        raw_str = (markdown_text or "").strip()
+        # ตัด markdown code block wrapper ```json ... ``` ออกหากมี
+        if raw_str.startswith("```"):
+            raw_str = re.sub(r"^```(?:json)?\s*", "", raw_str)
+            raw_str = re.sub(r"\s*```$", "", raw_str).strip()
+
+        if raw_str.startswith("{") and raw_str.endswith("}"):
+            try:
+                data = json.loads(raw_str)
+                if isinstance(data, dict) and "blocks" in data and isinstance(data["blocks"], list):
+                    self._render_structural_blocks(data["blocks"], images_queue, page_type=data.get("page_type", "document"))
+                    is_json = True
+            except Exception as e:
+                logger.warning(f"JSON layout parsing failed, falling back to markdown: {e}")
+                is_json = False
+
+        if not is_json:
+            # 2. ทำงานด้วย Markdown Line Parser เดิม (Backward Compatibility 100%)
+            self._render_markdown_lines(markdown_text.splitlines(), images_queue)
+
+    def _render_structural_blocks(self, blocks: list, images_queue: List[ExtractedImage], page_type: str = "document"):
+        """เรนเดอร์เนื้อหาจาก Structural Layout Blocks ที่มีสัดส่วนความกว้าง-สูง และการรวมเซลล์แบบแม่นยำ"""
+        for block in blocks:
+            b_type = str(block.get("type", "")).lower()
+            if b_type == "table":
+                self._create_structural_table(block, images_queue=images_queue)
+            elif b_type == "heading":
+                level = int(block.get("level", 1))
+                text = str(block.get("text", "")).strip()
+                align = str(block.get("align", "left")).lower()
+                p = self.doc.add_paragraph()
+                p.paragraph_format.keep_with_next = True
+                p.paragraph_format.space_before = Pt(3)
+                p.paragraph_format.space_after = Pt(1.5)
+                if "center" in align:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                elif "right" in align:
+                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                h_size = self.font_sizes.get(f"h{level}", self.font_sizes["h1"])
+                self._add_formatted_text_to_paragraph(p, text, size_pt=h_size, bold=True)
+            elif b_type == "paragraph":
+                text = str(block.get("text", "")).strip()
+                align = str(block.get("align", "left")).lower()
+                is_small = bool(block.get("is_small", False))
+                p = self.doc.add_paragraph()
+                p.paragraph_format.space_before = Pt(0)
+                p.paragraph_format.space_after = Pt(1.5)
+                p.paragraph_format.line_spacing = 1.10
+                if "center" in align:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                elif "right" in align:
+                    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                elif "justify" in align:
+                    p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                    p.paragraph_format.first_line_indent = Inches(0.4)
+                sz = self.font_sizes["small"] if is_small else self.font_sizes["body"]
+                self._add_formatted_text_to_paragraph(p, text, size_pt=sz)
+            elif b_type == "list":
+                ordered = bool(block.get("ordered", False))
+                style = "List Number" if ordered else "List Bullet"
+                for item in block.get("items", []):
+                    p = self.doc.add_paragraph(style=style)
+                    p.paragraph_format.space_before = Pt(0)
+                    p.paragraph_format.space_after = Pt(1)
+                    p.paragraph_format.line_spacing = 1.10
+                    self._add_formatted_text_to_paragraph(p, str(item).strip(), size_pt=self.font_sizes["body"])
+            elif b_type == "image":
+                if images_queue:
+                    img = images_queue.pop(0)
+                    self._insert_image(img)
+
+    def _create_structural_table(
+        self,
+        table_block: dict,
+        images_queue: Optional[List[ExtractedImage]] = None,
+    ):
+        """สร้างตารางตามพิกัดและสัดส่วนจริงของ Structural Table (Exact Widths, Heights, Merging)"""
+        rows_data = table_block.get("rows", [])
+        if not rows_data:
+            return
+
+        num_rows = len(rows_data)
+        num_cols = 0
+        for r_data in rows_data:
+            cells = r_data.get("cells", [])
+            cols_in_row = sum(max(1, int(c.get("colspan", 1))) for c in cells)
+            if cols_in_row > num_cols:
+                num_cols = cols_in_row
+
+        if num_cols == 0 or num_rows == 0:
+            return
+
+        total_page_width_in = 7.27  # A4 width (8.27 in) - 2 * 0.5 in margins
+        raw_widths = table_block.get("col_widths_pct") or []
+        if raw_widths and len(raw_widths) == num_cols:
+            total_w = sum(raw_widths)
+            if total_w > 0:
+                col_widths = [(w / total_w) * total_page_width_in for w in raw_widths]
+            else:
+                col_widths = [total_page_width_in / num_cols] * num_cols
+        else:
+            col_widths = [total_page_width_in / num_cols] * num_cols
+
+        table = self.doc.add_table(rows=num_rows, cols=num_cols)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+
+        border_style = str(table_block.get("border_style", "grid")).lower()
+        if "borderless" in border_style or "no_border" in border_style:
+            set_table_borderless(table)
+        elif "horizontal" in border_style:
+            set_table_horizontal_borders(table)
+        else:
+            table.style = "Table Grid"
+
+        # ขอบเซลล์กะทัดรัด (Padding: 20 dxa บน-ล่าง, 60 dxa ซ้าย-ขวา)
+        set_table_margins(table, top=20, bottom=20, left=60, right=60)
+
+        for c_idx, col in enumerate(table.columns):
+            if c_idx < len(col_widths):
+                col.width = Inches(col_widths[c_idx])
+
+        occupied = [[False for _ in range(num_cols)] for _ in range(num_rows)]
+        cells_to_merge = []
+
+        for r_idx, r_data in enumerate(rows_data):
+            row_elem = table.rows[r_idx]
+            trPr = row_elem._tr.get_or_add_trPr()
+            trPr.append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+
+            height_pt = r_data.get("height_pt")
+            if height_pt and height_pt > 0:
+                h_twips = int(height_pt * 20)
+                trPr.append(parse_xml(f'<w:trHeight {nsdecls("w")} w:val="{h_twips}" w:hRule="atLeast"/>'))
+
+            c_cursor = 0
+            for cell_data in r_data.get("cells", []):
+                while c_cursor < num_cols and occupied[r_idx][c_cursor]:
+                    c_cursor += 1
+                if c_cursor >= num_cols:
+                    break
+
+                colspan = max(1, int(cell_data.get("colspan", 1)))
+                rowspan = max(1, int(cell_data.get("rowspan", 1)))
+
+                for dr in range(rowspan):
+                    for dc in range(colspan):
+                        if r_idx + dr < num_rows and c_cursor + dc < num_cols:
+                            occupied[r_idx + dr][c_cursor + dc] = True
+
+                if colspan > 1 or rowspan > 1:
+                    end_r = min(num_rows - 1, r_idx + rowspan - 1)
+                    end_c = min(num_cols - 1, c_cursor + colspan - 1)
+                    cells_to_merge.append((r_idx, c_cursor, end_r, end_c))
+
+                target_cell = row_elem.cells[c_cursor]
+                merged_width = sum(col_widths[c_cursor + dc] for dc in range(colspan) if c_cursor + dc < len(col_widths))
+                target_cell.width = Inches(merged_width)
+
+                self._populate_structural_cell(target_cell, cell_data, images_queue, merged_width)
+                c_cursor += colspan
+
+        for (sr, sc, er, ec) in cells_to_merge:
+            try:
+                table.cell(sr, sc).merge(table.cell(er, ec))
+            except Exception as e:
+                logger.warning(f"Cell merge failed ({sr}, {sc}) -> ({er}, {ec}): {e}")
+
+        # ย่อหน้าคั่นตาราง 1 pt ป้องกันตารางรวมกัน
+        sep_p = self.doc.add_paragraph()
+        sep_p.paragraph_format.space_before = Pt(0)
+        sep_p.paragraph_format.space_after = Pt(0)
+        sep_p.paragraph_format.line_spacing = Pt(1)
+        run = sep_p.add_run()
+        run.font.size = Pt(1)
+
+    def _populate_structural_cell(
+        self,
+        cell,
+        cell_data: dict,
+        images_queue: Optional[List[ExtractedImage]],
+        cell_width_in: float,
+    ):
+        """หยอดข้อมูล ข้อความ ป้าย Badge และรูปภาพลงในเซลล์ตารางพร้อมจัดรูปแบบ"""
+        valign_str = str(cell_data.get("valign", "center")).lower()
+        if "top" in valign_str:
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+        elif "bottom" in valign_str:
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.BOTTOM
+        else:
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+        bg_color = cell_data.get("bg_color")
+        is_badge = bool(cell_data.get("is_badge", False))
+        text_val = str(cell_data.get("text", "")).strip()
+        if not is_badge and text_val.upper() in ["W", "RR", "PICK UP", "COD"]:
+            is_badge = True
+
+        if is_badge:
+            bg_color = bg_color or "595959"
+            set_cell_background(cell, bg_color)
+        elif bg_color:
+            set_cell_background(cell, str(bg_color).lstrip("#"))
+
+        cell.text = ""
+        has_image = bool(cell_data.get("has_image", False)) or ("[IMAGE]" in text_val.upper())
+
+        from .gemini_extractor import clean_thai_ocr_text
+        text_val = clean_thai_ocr_text(text_val)
+        text_val = text_val.replace("&nbsp;", " ")
+        text_val = re.sub(r"</?hr\s*/?>", "<br>", text_val, flags=re.IGNORECASE)
+
+        lines = re.split(r"<br\s*/?>|\n", text_val, flags=re.IGNORECASE)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines:
+            lines = [""]
+
+        align_str = str(cell_data.get("align", "left")).lower()
+        if "center" in align_str or is_badge:
+            p_align = WD_ALIGN_PARAGRAPH.CENTER
+        elif "right" in align_str:
+            p_align = WD_ALIGN_PARAGRAPH.RIGHT
+        elif "justify" in align_str:
+            p_align = WD_ALIGN_PARAGRAPH.JUSTIFY
+        else:
+            p_align = WD_ALIGN_PARAGRAPH.LEFT
+
+        bold = bool(cell_data.get("bold", False)) or is_badge
+        font_size = cell_data.get("font_size_pt")
+        if not font_size:
+            font_size = 11.5 if is_badge else max(9.0, self.font_sizes["body"] - 4.5)
+
+        color_rgb = RGBColor(255, 255, 255) if (is_badge or bg_color in ["595959", "#595959"]) else None
+
+        for line_idx, line in enumerate(lines):
+            line_str = line.strip()
+            p = cell.paragraphs[0] if (line_idx == 0 and cell.paragraphs) else cell.add_paragraph()
+
+            p.paragraph_format.space_before = Pt(0.5)
+            p.paragraph_format.space_after = Pt(0.5)
+            p.paragraph_format.line_spacing = 1.0
+            p.alignment = p_align
+
+            if "[IMAGE]" in line_str.upper() or (has_image and line_idx == 0):
+                remaining = re.sub(r"\[IMAGE\]", "", line_str, flags=re.IGNORECASE).strip()
+                if images_queue:
+                    img = images_queue.pop(0)
+                    self._insert_image_to_paragraph(p, img, max_width_inches=min(cell_width_in, 3.0))
+                if remaining:
+                    p2 = cell.add_paragraph()
+                    p2.paragraph_format.space_before = Pt(0.5)
+                    p2.paragraph_format.space_after = Pt(0.5)
+                    p2.paragraph_format.line_spacing = 1.0
+                    p2.alignment = p_align
+                    self._add_formatted_text_to_paragraph(p2, remaining, size_pt=font_size, bold=bold, color_rgb=color_rgb)
+                continue
+
+            if not line_str:
+                continue
+
+            self._add_formatted_text_to_paragraph(p, line_str, size_pt=font_size, bold=bold, color_rgb=color_rgb)
+
+    def _render_markdown_lines(self, lines: List[str], images_queue: List[ExtractedImage]):
+        """เรนเดอร์เอกสารตามบรรทัด Markdown แบบเดิม (Legacy Fallback)"""
         i = 0
         while i < len(lines):
             raw_line = lines[i].strip()

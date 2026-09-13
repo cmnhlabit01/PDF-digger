@@ -61,6 +61,7 @@ class PDFPageData:
     rendered_image_bytes: bytes
     embedded_images: List[ExtractedImage]
     has_text: bool
+    vector_tables: Optional[List[dict]] = None
 
 
 class PDFProcessor:
@@ -150,11 +151,31 @@ class PDFProcessor:
             # 3. สกัดรูปภาพที่ฝังอยู่ในหน้า
             embedded_images = self._extract_images_from_page(doc, page, page_num)
 
+            # 4. สกัดพิกัดตารางจริงจากเวกเตอร์ (Vector Table Geometry)
+            vector_tables = []
+            try:
+                tabs = page.find_tables()
+                for t in tabs.tables:
+                    bbox = t.bbox
+                    t_w = bbox[2] - bbox[0]
+                    t_h = bbox[3] - bbox[1]
+                    if t_w > 40 and t_h > 15 and t.col_count >= 1:
+                        vector_tables.append({
+                            "col_count": t.col_count,
+                            "row_count": t.row_count,
+                            "bbox": bbox,
+                            "width_pt": t_w,
+                            "height_pt": t_h,
+                        })
+            except Exception:
+                vector_tables = []
+
             return PDFPageData(
                 page_num=page_num,
                 rendered_image_bytes=rendered_image_bytes,
                 embedded_images=embedded_images,
                 has_text=has_text,
+                vector_tables=vector_tables,
             )
 
     def _extract_images_from_page(

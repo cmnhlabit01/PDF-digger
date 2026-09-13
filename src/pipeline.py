@@ -186,7 +186,10 @@ class PDFToWordPipeline:
                 return None
 
             md_text, m_used, p_font = extractor.extract_page_markdown(
-                p_data.rendered_image_bytes, p_idx, target_language=eff_lang
+                p_data.rendered_image_bytes,
+                p_idx,
+                target_language=eff_lang,
+                vector_tables=getattr(p_data, "vector_tables", None),
             )
             return (p_idx, p_data, md_text, m_used, p_font)
 

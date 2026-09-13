@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import threading
 import time
@@ -685,6 +686,146 @@ class TestPDFDigger(unittest.TestCase):
             self.assertTrue(any("ยกเลิก" in err for err in errors))
 
         print("✅ ทดสอบ Pipeline Cancellation (ยกเลิกการทำงานกลางคัน) สำเร็จ")
+
+    def test_structural_layout_json_and_a4_dimensions(self):
+        """ทดสอบการสร้างเอกสาร Word จาก Structural Layout JSON และการตั้งค่าหน้ากระดาษ A4"""
+        builder = DocxBuilder()
+        # 1. ตรวจสอบขนาดหน้ากระดาษ A4 (8.27 x 11.69 นิ้ว)
+        for sec in builder.doc.sections:
+            self.assertAlmostEqual(sec.page_width.inches, 8.27, places=2)
+            self.assertAlmostEqual(sec.page_height.inches, 11.69, places=2)
+
+        # 2. จำลอง Structural Layout JSON ที่มีตารางพร้อมสัดส่วนคอลัมน์ [60, 40] และการผสานเซลล์
+        sample_json = json.dumps({
+            "page_type": "form",
+            "detected_font": "Cordia New",
+            "blocks": [
+                {
+                    "type": "heading",
+                    "level": 1,
+                    "text": "ใบรับรองการจัดส่งพัสดุ",
+                    "align": "center",
+                },
+                {
+                    "type": "paragraph",
+                    "text": "รายละเอียดข้อมูลเส้นทางและผู้รับพัสดุ",
+                    "align": "left",
+                },
+                {
+                    "type": "table",
+                    "border_style": "grid",
+                    "col_widths_pct": [60, 40],
+                    "rows": [
+                        {
+                            "height_pt": 35,
+                            "cells": [
+                                {
+                                    "text": "ผู้รับ: สมชาย ใจดี<br>โทร: 081-234-5678",
+                                    "colspan": 1,
+                                    "rowspan": 2,
+                                    "align": "left",
+                                    "valign": "top",
+                                    "bold": False,
+                                },
+                                {
+                                    "text": "PICK UP",
+                                    "colspan": 1,
+                                    "rowspan": 1,
+                                    "align": "center",
+                                    "is_badge": True,
+                                    "bg_color": "595959",
+                                },
+                            ],
+                        },
+                        {
+                            "height_pt": 30,
+                            "cells": [
+                                {
+                                    "text": "รหัส: TH2608793615733",
+                                    "colspan": 1,
+                                    "rowspan": 1,
+                                    "align": "center",
+                                    "bold": True,
+                                    "font_size_pt": 14,
+                                },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "type": "list",
+                    "ordered": False,
+                    "items": ["พัสดุเรียบร้อย", "ไม่เสียหาย"],
+                },
+            ],
+        }, ensure_ascii=False)
+
+        builder.add_page_content(
+            markdown_text=sample_json,
+            page_num=1,
+            images=[],
+            is_first_page=True,
+        )
+
+        out_path = self.test_dir / "structural_test_output.docx"
+        builder.save(out_path)
+        self.assertTrue(out_path.exists())
+
+        doc = docx.Document(str(out_path))
+        self.assertEqual(len(doc.tables), 1)
+        tbl = doc.tables[0]
+        self.assertEqual(len(tbl.rows), 2)
+        self.assertEqual(len(tbl.columns), 2)
+
+        # ตรวจสอบการผสานเซลล์แถวที่ 0 และ 1 ในคอลัมน์แรก (rowspan=2)
+        cell_0_0 = tbl.cell(0, 0)
+        cell_1_0 = tbl.cell(1, 0)
+        self.assertEqual(cell_0_0.text, cell_1_0.text)
+        self.assertIn("สมชาย ใจดี", cell_0_0.text)
+
+        # ตรวจสอบป้าย Badge (เซลล์แถวที่ 0 คอลัมน์ที่ 1)
+        badge_cell = tbl.cell(0, 1)
+        self.assertIn("PICK UP", badge_cell.text)
+        tcPr = badge_cell._tc.get_or_add_tcPr()
+        shd = tcPr.find(qn("w:shd"))
+        self.assertIsNotNone(shd)
+        self.assertEqual(shd.get(qn("w:fill")), "595959")
+
+        print("✅ ทดสอบ Structural Layout JSON Table & A4 Dimensions สำเร็จ")
+
+    def test_gemini_extractor_clean_thai_in_blocks(self):
+        """ทดสอบการทำความสะอาดวรรณยุกต์และคำผิดภาษาไทยใน Structural Layout JSON Blocks"""
+        extractor = GeminiExtractor(api_key="dummy_key")
+        blocks = [
+            {
+                "type": "heading",
+                "text": "ขั#นตอนการทำงาน เพืLอความถูกต้อง",
+            },
+            {
+                "type": "table",
+                "rows": [
+                    {
+                        "cells": [
+                            {"text": "วันที2 ๑๕ มกราคม"},
+                            {"text": "ชั2น 3 อาคารผู้ป่วย"},
+                        ]
+                    }
+                ],
+            },
+            {
+                "type": "list",
+                "items": ["สิ3นสุดกระบวนการ"],
+            }
+        ]
+
+        extractor._clean_thai_in_blocks(blocks)
+        self.assertIn("ขั้นตอน", blocks[0]["text"])
+        self.assertIn("เพื่อ", blocks[0]["text"])
+        self.assertEqual(blocks[1]["rows"][0]["cells"][0]["text"], "วันที่ ๑๕ มกราคม")
+        self.assertEqual(blocks[1]["rows"][0]["cells"][1]["text"], "ชั้น 3 อาคารผู้ป่วย")
+        self.assertEqual(blocks[2]["items"][0], "สิ้นสุดกระบวนการ")
+
+        print("✅ ทดสอบ GeminiExtractor Thai OCR Cleaner in JSON Blocks สำเร็จ")
 
 
 if __name__ == "__main__":
