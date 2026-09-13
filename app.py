@@ -1,6 +1,8 @@
 import io
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 from PIL import Image
 import streamlit as st
@@ -123,72 +125,78 @@ def main():
     if uploaded_file is not None:
         file_ext = Path(uploaded_file.name).suffix.lower()
         is_direct_image = file_ext in SUPPORTED_IMAGE_EXTENSIONS
+        file_bytes = uploaded_file.getvalue()
+
+        # Reset active job if uploaded file changes
+        if st.session_state.get("active_file_name") != uploaded_file.name:
+            st.session_state.active_file_name = uploaded_file.name
+            st.session_state.conversion_job = None
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_file.write(uploaded_file.read())
+            tmp_file.write(file_bytes)
             tmp_file_path = Path(tmp_file.name)
 
-        if is_direct_image:
-            total_pages = 1
-            file_type_label = "รูปภาพเดี่ยว"
-        else:
-            with fitz.open(tmp_file_path) as doc:
-                total_pages = len(doc)
-            file_type_label = "เอกสาร PDF"
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("ชื่อไฟล์", uploaded_file.name)
-        with col2:
-            st.metric("ประเภท / จำนวนหน้า", f"{file_type_label} ({total_pages} หน้า)")
-        with col3:
-            file_size_mb = uploaded_file.size / (1024 * 1024)
-            st.metric("ขนาดไฟล์", f"{file_size_mb:.2f} MB")
-
-        # ตรวจสอบฟอนต์ต้นฉบับเบื้องต้น
-        temp_processor = PDFProcessor(tmp_file_path)
-        pre_detected_font = temp_processor.detect_font()
-        if pre_detected_font:
-            st.info(f"🔤 **ตรวจพบฟอนต์ต้นฉบับใน PDF:** `{pre_detected_font}` (ระบบจะนำฟอนต์นี้ไปจัดหน้าใน Word ให้อัตโนมัติ)")
-        else:
-            st.caption("ℹ️ ภาพสแกน/รูปภาพ ระบบจะวิเคราะห์ฟอนต์จากลักษณะตัวอักษร หรือใช้ Cordia New เป็นค่าเริ่มต้นที่ปลอดภัย")
-
-        # แสดงตัวอย่างหน้าแรก
-        with st.expander("🔍 ดูตัวอย่างหน้าเอกสาร (หน้า 1)", expanded=False):
+        try:
             if is_direct_image:
-                st.image(str(tmp_file_path), caption=uploaded_file.name, use_container_width=True)
+                total_pages = 1
+                file_type_label = "รูปภาพเดี่ยว"
             else:
                 with fitz.open(tmp_file_path) as doc:
-                    if len(doc) > 0:
-                        page_0 = doc[0]
-                        pix = page_0.get_pixmap(dpi=150)
-                        img_bytes = pix.tobytes(output="png")
-                        st.image(img_bytes, caption="ตัวอย่างหน้า 1", use_container_width=True)
+                    total_pages = len(doc)
+                file_type_label = "เอกสาร PDF"
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("ชื่อไฟล์", uploaded_file.name)
+            with col2:
+                st.metric("ประเภท / จำนวนหน้า", f"{file_type_label} ({total_pages} หน้า)")
+            with col3:
+                file_size_mb = len(file_bytes) / (1024 * 1024)
+                st.metric("ขนาดไฟล์", f"{file_size_mb:.2f} MB")
+
+            # ตรวจสอบฟอนต์ต้นฉบับเบื้องต้น
+            temp_processor = PDFProcessor(tmp_file_path)
+            pre_detected_font = temp_processor.detect_font()
+            if pre_detected_font:
+                st.info(f"🔤 **ตรวจพบฟอนต์ต้นฉบับใน PDF:** `{pre_detected_font}` (ระบบจะนำฟอนต์นี้ไปจัดหน้าใน Word ให้อัตโนมัติ)")
+            else:
+                st.caption("ℹ️ ภาพสแกน/รูปภาพ ระบบจะวิเคราะห์ฟอนต์จากลักษณะตัวอักษร หรือใช้ Cordia New เป็นค่าเริ่มต้นที่ปลอดภัย")
+
+            # แสดงตัวอย่างหน้าแรก
+            with st.expander("🔍 ดูตัวอย่างหน้าเอกสาร (หน้า 1)", expanded=False):
+                if is_direct_image:
+                    st.image(file_bytes, caption=uploaded_file.name, use_container_width=True)
+                else:
+                    with fitz.open(tmp_file_path) as doc:
+                        if len(doc) > 0:
+                            page_0 = doc[0]
+                            pix = page_0.get_pixmap(dpi=150)
+                            img_bytes = pix.tobytes(output="png")
+                            st.image(img_bytes, caption="ตัวอย่างหน้า 1", use_container_width=True)
+        finally:
+            if tmp_file_path.exists():
+                tmp_file_path.unlink()
 
         st.divider()
 
-        # ปุ่มเริ่มการแปลงไฟล์
-        btn_label = "🚀 เริ่มแปลงเอกสารเป็น Word (.docx)"
-        if target_language != "original":
-            btn_label += f" [แปลเป็น: {translate_dict[target_language]}]"
-        start_btn = st.button(btn_label, type="primary", use_container_width=True)
+        job = st.session_state.get("conversion_job")
 
-        if start_btn:
-            models_to_use = FALLBACK_MODELS.copy()
+        # ถ้ายังไม่มี job ที่กำลังทำงาน ให้แสดงปุ่มเริ่มแปลง
+        if job is None:
+            btn_label = "🚀 เริ่มแปลงเอกสารเป็น Word (.docx)"
+            if target_language != "original":
+                btn_label += f" [แปลเป็น: {translate_dict[target_language]}]"
+            start_btn = st.button(btn_label, type="primary", use_container_width=True)
 
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            if start_btn:
+                models_to_use = FALLBACK_MODELS.copy()
+                is_auto_font = font_choice.startswith("🔍")
+                target_font = None if is_auto_font else font_choice
 
-            is_auto_font = font_choice.startswith("🔍")
-            target_font = None if is_auto_font else font_choice
+                job_input = Path(tempfile.NamedTemporaryFile(delete=False, suffix=file_ext).name)
+                job_input.write_bytes(file_bytes)
+                job_output = job_input.with_suffix(".docx")
 
-            output_docx_path = tmp_file_path.with_suffix(".docx")
-
-            def update_progress_ui(current: int, total: int, msg: str):
-                progress_bar.progress(int((current / total) * 100))
-                status_text.info(f"⏳ **[{current}/{total}]** {msg}")
-
-            try:
                 pipeline = PDFToWordPipeline(
                     api_key=api_key,
                     font_name=target_font,
@@ -198,17 +206,110 @@ def main():
                     enhance_image=enhance_image,
                 )
 
-                report = pipeline.convert(
-                    pdf_path=tmp_file_path,
-                    output_docx_path=output_docx_path,
-                    progress_callback=update_progress_ui,
-                    target_language=target_language,
-                    enhance_image=enhance_image,
-                )
+                job_data = {
+                    "pipeline": pipeline,
+                    "thread": None,
+                    "progress": 0,
+                    "message": "กำลังเตรียมความพร้อม...",
+                    "status": "running",
+                    "report": None,
+                    "error_msg": None,
+                    "docx_bytes": None,
+                    "output_filename": f"{Path(uploaded_file.name).stem}_converted.docx",
+                    "job_input": job_input,
+                    "job_output": job_output,
+                    "balloons_shown": False,
+                }
 
-                progress_bar.progress(100)
-                status_text.success("🎉 แปลงเอกสารเป็น Word สำเร็จเรียบร้อยแล้ว!")
-                st.balloons()
+                def run_worker(j):
+                    def progress_cb(cur, tot, msg):
+                        pct = int((cur / tot) * 100) if tot > 0 else 0
+                        j["progress"] = pct
+                        j["message"] = f"[{cur}/{tot}] {msg}"
+
+                    try:
+                        rep = j["pipeline"].convert(
+                            pdf_path=j["job_input"],
+                            output_docx_path=j["job_output"],
+                            progress_callback=progress_cb,
+                            target_language=target_language,
+                            enhance_image=enhance_image,
+                        )
+                        if j["pipeline"].is_cancelled:
+                            j["status"] = "cancelled"
+                            j["message"] = "🛑 ยกเลิกการแปลงเอกสารเรียบร้อยแล้ว"
+                        else:
+                            j["status"] = "completed"
+                            j["report"] = rep
+                            if j["job_output"].exists():
+                                with open(j["job_output"], "rb") as f_docx:
+                                    j["docx_bytes"] = f_docx.read()
+                    except Exception as exc:
+                        if j["pipeline"].is_cancelled:
+                            j["status"] = "cancelled"
+                            j["message"] = "🛑 ยกเลิกการแปลงเอกสารเรียบร้อยแล้ว"
+                        else:
+                            j["status"] = "error"
+                            j["error_msg"] = str(exc)
+                    finally:
+                        try:
+                            if j["job_input"].exists():
+                                j["job_input"].unlink()
+                            if j["job_output"].exists():
+                                j["job_output"].unlink()
+                        except Exception:
+                            pass
+
+                t = threading.Thread(target=run_worker, args=(job_data,), daemon=True)
+                job_data["thread"] = t
+                t.start()
+                st.session_state.conversion_job = job_data
+                st.rerun()
+
+        else:
+            # มี Job ที่กำลังทำงาน หรือเสร็จสิ้นแล้ว
+            status = job["status"]
+
+            if status in ("running", "paused"):
+                st.progress(job["progress"])
+
+                if job["pipeline"].is_paused:
+                    st.warning(f"⏸️ **สถานะ: หยุดชั่วคราว** — {job['message']}")
+                else:
+                    st.info(f"⏳ **สถานะ: กำลังประมวลผล** — {job['message']}")
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    if job["pipeline"].is_paused:
+                        if st.button("▶️ เริ่มทำงานต่อ (Resume)", type="primary", use_container_width=True):
+                            job["pipeline"].resume()
+                            job["status"] = "running"
+                            st.rerun()
+                    else:
+                        if st.button("⏸️ หยุดชั่วคราว (Pause)", use_container_width=True):
+                            job["pipeline"].pause()
+                            job["status"] = "paused"
+                            st.rerun()
+                with c2:
+                    if st.button("🛑 ยกเลิกการแปลง (Cancel)", use_container_width=True):
+                        job["pipeline"].cancel()
+                        job["status"] = "cancelled"
+                        st.rerun()
+
+                # Polling update
+                if job["thread"] and job["thread"].is_alive():
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.rerun()
+
+            elif status == "completed":
+                report = job["report"]
+                st.progress(100)
+                st.success("🎉 แปลงเอกสารเป็น Word สำเร็จเรียบร้อยแล้ว!")
+                if not job.get("balloons_shown", False):
+                    st.balloons()
+                    job["balloons_shown"] = True
 
                 # สรุปผล
                 c1, c2, c3 = st.columns(3)
@@ -228,16 +329,11 @@ def main():
                 if report.enhanced:
                     st.caption("✨ ประมวลผลด้วยโหมดปรับความคมชัดพิเศษ (Enhanced Mode)")
 
-                # อ่านไฟล์ Word ที่สร้างขึ้น
-                with open(output_docx_path, "rb") as f_docx:
-                    docx_bytes = f_docx.read()
-
                 # ปุ่มดาวน์โหลดไฟล์ Word
-                output_filename = f"{Path(uploaded_file.name).stem}_converted.docx"
                 st.download_button(
-                    label=f"📥 ดาวน์โหลดไฟล์ Word: {output_filename}",
-                    data=docx_bytes,
-                    file_name=output_filename,
+                    label=f"📥 ดาวน์โหลดไฟล์ Word: {job['output_filename']}",
+                    data=job["docx_bytes"],
+                    file_name=job["output_filename"],
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     type="primary",
                     use_container_width=True,
@@ -250,13 +346,21 @@ def main():
                         st.markdown(p_res.markdown_text)
                         st.divider()
 
-            except Exception as e:
-                st.error(f"❌ เกิดข้อผิดพลาดระหว่างประมวลผล: {e}")
-            finally:
-                if tmp_file_path.exists():
-                    tmp_file_path.unlink()
-                if output_docx_path.exists():
-                    output_docx_path.unlink()
+                if st.button("🔄 แปลงไฟล์อื่น / เริ่มต้นใหม่", use_container_width=True):
+                    st.session_state.conversion_job = None
+                    st.rerun()
+
+            elif status == "cancelled":
+                st.warning("🛑 ยกเลิกการแปลงเอกสารเรียบร้อยแล้ว")
+                if st.button("🔄 เริ่มแปลงใหม่อีกครั้ง", type="primary", use_container_width=True):
+                    st.session_state.conversion_job = None
+                    st.rerun()
+
+            elif status == "error":
+                st.error(f"❌ เกิดข้อผิดพลาดระหว่างประมวลผล: {job['error_msg']}")
+                if st.button("🔄 ลองใหม่อีกครั้ง", type="primary", use_container_width=True):
+                    st.session_state.conversion_job = None
+                    st.rerun()
 
 
 if __name__ == "__main__":

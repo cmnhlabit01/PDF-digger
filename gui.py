@@ -4,6 +4,7 @@ import sys
 import threading
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Optional
 import customtkinter as ctk
 
 from src.config import DEFAULT_FONT, FALLBACK_MODELS
@@ -26,6 +27,7 @@ class PDFDiggerApp(ctk.CTk):
         self.selected_pdf: Path | None = None
         self.output_docx: Path | None = None
         self.is_converting = False
+        self.current_pipeline: Optional[PDFToWordPipeline] = None
 
         self._setup_ui()
 
@@ -196,6 +198,33 @@ class PDFDiggerApp(ctk.CTk):
         )
         self.status_label.pack(anchor="w", padx=16, pady=(2, 4))
 
+        # Control buttons frame (ปุ่มหยุดชั่วคราว / เริ่มทำงานต่อ / ยกเลิก)
+        self.control_frame = ctk.CTkFrame(action_card, fg_color="transparent")
+        self.control_frame.grid_columnconfigure(0, weight=1)
+        self.control_frame.grid_columnconfigure(1, weight=1)
+
+        self.pause_btn = ctk.CTkButton(
+            self.control_frame,
+            text="⏸️ หยุดชั่วคราว",
+            command=self._toggle_pause,
+            height=36,
+            font=ctk.CTkFont(family="Cordia New", size=16, weight="bold"),
+            fg_color="#F59E0B",
+            hover_color="#D97706",
+        )
+        self.pause_btn.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+
+        self.cancel_btn = ctk.CTkButton(
+            self.control_frame,
+            text="🛑 ยกเลิกการทำงาน",
+            command=self._cancel_conversion,
+            height=36,
+            font=ctk.CTkFont(family="Cordia New", size=16),
+            fg_color="#EF4444",
+            hover_color="#DC2626",
+        )
+        self.cancel_btn.grid(row=0, column=1, padx=(6, 0), sticky="ew")
+
         # Action buttons frame (appear after success)
         self.result_frame = ctk.CTkFrame(action_card, fg_color="transparent")
         self.result_frame.pack(fill="x", padx=16, pady=(2, 12))
@@ -256,6 +285,38 @@ class PDFDiggerApp(ctk.CTk):
         except Exception as e:
             self.pdf_info_label.configure(text=f"ข้อผิดพลาดในการอ่านไฟล์: {e}", text_color="red")
 
+    def _toggle_pause(self):
+        if not self.current_pipeline or not self.is_converting:
+            return
+
+        if self.current_pipeline.is_paused:
+            self.current_pipeline.resume()
+            self.pause_btn.configure(
+                text="⏸️ หยุดชั่วคราว",
+                fg_color="#F59E0B",
+                hover_color="#D97706",
+            )
+            self.status_label.configure(text="⏳ กำลังทำงานต่อ...", text_color="#2563EB")
+        else:
+            self.current_pipeline.pause()
+            self.pause_btn.configure(
+                text="▶️ เริ่มทำงานต่อ",
+                fg_color="#10B981",
+                hover_color="#059669",
+            )
+            self.status_label.configure(
+                text="⏸️ หยุดชั่วคราวแล้ว (กด 'เริ่มทำงานต่อ' เพื่อประมวลผลต่อ)",
+                text_color="#F59E0B",
+            )
+
+    def _cancel_conversion(self):
+        if not self.current_pipeline or not self.is_converting:
+            return
+
+        if messagebox.askyesno("ยืนยันการยกเลิก", "คุณต้องการยกเลิกการแปลงเอกสารใช่หรือไม่?"):
+            self.current_pipeline.cancel()
+            self.status_label.configure(text="🛑 กำลังยกเลิกการทำงาน...", text_color="#EF4444")
+
     def _start_conversion_thread(self):
         if self.is_converting:
             return
@@ -274,6 +335,12 @@ class PDFDiggerApp(ctk.CTk):
 
         self.is_converting = True
         self.start_btn.configure(state="disabled")
+        self.pause_btn.configure(
+            text="⏸️ หยุดชั่วคราว",
+            fg_color="#F59E0B",
+            hover_color="#D97706",
+        )
+        self.control_frame.pack(fill="x", padx=16, pady=(4, 8))
         self.progress_bar.set(0)
         self.status_label.configure(text="กำลังเริ่มต้นกระบวนการ...", text_color="#3B82F6")
         self.open_doc_btn.grid_forget()
@@ -300,7 +367,7 @@ class PDFDiggerApp(ctk.CTk):
             self.after(0, lambda: self._update_progress_ui(progress_ratio, current, total, msg))
 
         try:
-            pipeline = PDFToWordPipeline(
+            self.current_pipeline = PDFToWordPipeline(
                 api_key=api_key,
                 font_name=target_font,
                 auto_detect_font=is_auto_font,
@@ -309,7 +376,7 @@ class PDFDiggerApp(ctk.CTk):
                 enhance_image=enhance,
             )
 
-            report = pipeline.convert(
+            report = self.current_pipeline.convert(
                 pdf_path=self.selected_pdf,
                 output_docx_path=self.output_docx,
                 progress_callback=progress_callback,
@@ -329,6 +396,7 @@ class PDFDiggerApp(ctk.CTk):
     def _on_success(self, report):
         self.is_converting = False
         self.start_btn.configure(state="normal")
+        self.control_frame.pack_forget()
         self.progress_bar.set(1.0)
 
         font_info = report.applied_font
@@ -351,8 +419,13 @@ class PDFDiggerApp(ctk.CTk):
     def _on_error(self, err_msg: str):
         self.is_converting = False
         self.start_btn.configure(state="normal")
-        self.status_label.configure(text=f"❌ เกิดข้อผิดพลาด: {err_msg}", text_color="red")
-        messagebox.showerror("เกิดข้อผิดพลาด", f"ไม่สามารถแปลงไฟล์ได้:\n{err_msg}")
+        self.control_frame.pack_forget()
+        if "ยกเลิก" in err_msg:
+            self.status_label.configure(text="🛑 การแปลงเอกสารถูกยกเลิกโดยผู้ใช้", text_color="#EF4444")
+            self.progress_bar.set(0)
+        else:
+            self.status_label.configure(text=f"❌ เกิดข้อผิดพลาด: {err_msg}", text_color="red")
+            messagebox.showerror("เกิดข้อผิดพลาด", f"ไม่สามารถแปลงไฟล์ได้:\n{err_msg}")
 
     def _open_output_docx(self):
         if self.output_docx and self.output_docx.exists():

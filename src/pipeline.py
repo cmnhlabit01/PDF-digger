@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +60,33 @@ class PDFToWordPipeline:
         self.target_language = target_language
         self.enhance_image = enhance_image
         self.fallback_events: List[str] = []
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # ค่าเริ่มต้น: ทำงานปกติ
+        self._cancel_event = threading.Event()
+
+    def pause(self):
+        """สั่งหยุดการทำงานชั่วคราว"""
+        self._pause_event.clear()
+        logger.info("⏸️ ไปป์ไลน์ถูกสั่งหยุดชั่วคราว (Paused)")
+
+    def resume(self):
+        """สั่งให้เริ่มทำงานต่อจากจุดที่พักไว้"""
+        self._pause_event.set()
+        logger.info("▶️ ไปป์ไลน์เริ่มทำงานต่อ (Resumed)")
+
+    @property
+    def is_paused(self) -> bool:
+        return not self._pause_event.is_set()
+
+    def cancel(self):
+        """สั่งยกเลิกการทำงาน"""
+        self._cancel_event.set()
+        self._pause_event.set()  # ปลดล็อกหากพักอยู่ เพื่อให้เธรดยกเลิกได้ทันที
+        logger.info("🛑 ไปป์ไลน์ถูกยกเลิก (Cancelled)")
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def _handle_fallback(self, prev_model: str, next_model: str, reason: str):
         event_msg = f"สลับจาก {prev_model} ➔ {next_model} (สาเหตุ: {reason})"
@@ -93,6 +122,8 @@ class PDFToWordPipeline:
         eff_enhance = enhance_image if enhance_image is not None else self.enhance_image
 
         self.fallback_events = []
+        self._pause_event.set()
+        self._cancel_event.clear()
 
         def on_extractor_fallback(prev_model: str, next_model: str, reason: str):
             self._handle_fallback(prev_model, next_model, reason)
@@ -136,7 +167,24 @@ class PDFToWordPipeline:
         logger.info(f"เริ่มแปลงไฟล์: {input_file.name} (จำนวน {total_pages} หน้า, ฟอนต์: {applied_font}{lang_label}{enhance_label})")
 
         def process_page_task(p_idx: int):
+            while not self._pause_event.is_set():
+                if self._cancel_event.is_set():
+                    return None
+                time.sleep(0.2)
+
+            if self._cancel_event.is_set():
+                return None
+
             p_data = processor.process_page(p_idx, enhance=eff_enhance)
+
+            while not self._pause_event.is_set():
+                if self._cancel_event.is_set():
+                    return None
+                time.sleep(0.2)
+
+            if self._cancel_event.is_set():
+                return None
+
             md_text, m_used, p_font = extractor.extract_page_markdown(
                 p_data.rendered_image_bytes, p_idx, target_language=eff_lang
             )
@@ -155,17 +203,29 @@ class PDFToWordPipeline:
                     for p_idx in range(total_pages)
                 }
                 for future in as_completed(future_to_idx):
-                    completed_count += 1
+                    if self._cancel_event.is_set():
+                        break
                     res = future.result()
-                    raw_results.append(res)
-                    if progress_callback:
-                        progress_callback(
-                            completed_count,
-                            total_pages,
-                            f"อ่านและสกัดข้อมูลเสร็จแล้ว {completed_count}/{total_pages} หน้า...",
-                        )
+                    if res is not None:
+                        completed_count += 1
+                        raw_results.append(res)
+                        if progress_callback:
+                            progress_callback(
+                                completed_count,
+                                total_pages,
+                                f"อ่านและสกัดข้อมูลเสร็จแล้ว {completed_count}/{total_pages} หน้า...",
+                            )
         else:
             for p_idx in range(total_pages):
+                if self._cancel_event.is_set():
+                    break
+                while not self._pause_event.is_set():
+                    if self._cancel_event.is_set():
+                        break
+                    time.sleep(0.2)
+                if self._cancel_event.is_set():
+                    break
+
                 if progress_callback:
                     progress_callback(
                         p_idx + 1,
@@ -173,7 +233,16 @@ class PDFToWordPipeline:
                         f"กำลังอ่านและสกัดข้อมูลหน้า {p_idx + 1}/{total_pages}...",
                     )
                 res = process_page_task(p_idx)
-                raw_results.append(res)
+                if res is not None:
+                    raw_results.append(res)
+
+        if self._cancel_event.is_set():
+            raise RuntimeError("การแปลงเอกสารถูกยกเลิกโดยผู้ใช้")
+
+        while not self._pause_event.is_set():
+            if self._cancel_event.is_set():
+                raise RuntimeError("การแปลงเอกสารถูกยกเลิกโดยผู้ใช้")
+            time.sleep(0.2)
 
         # เรียงผลลัพธ์กลับตามลำดับหน้า 0, 1, 2, ... ให้ตรงตามต้นฉบับเสมอ
         raw_results.sort(key=lambda x: x[0])

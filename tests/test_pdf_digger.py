@@ -1,5 +1,7 @@
 import io
 import os
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,6 +15,7 @@ from src.config import DEFAULT_FONT, FALLBACK_MODELS
 from src.docx_builder import DocxBuilder
 from src.gemini_extractor import GeminiExtractor, clean_thai_ocr_text
 from src.pdf_processor import ExtractedImage, PDFProcessor, enhance_document_image
+from src.pipeline import PDFToWordPipeline
 
 
 class TestPDFDigger(unittest.TestCase):
@@ -589,6 +592,99 @@ class TestPDFDigger(unittest.TestCase):
         # ต้องมี 4 คอลัมน์เท่ากับจำนวนคอลัมน์สูงสุด
         self.assertEqual(len(tbl.columns), 4)
         print("✅ ทดสอบ Uneven Table Columns Handling (ป้องกัน list index out of range) สำเร็จ")
+
+    def test_pipeline_pause_and_resume(self):
+        """ทดสอบระบบหยุดชั่วคราว (Pause) และเริ่มทำงานต่อ (Resume) ใน PDFToWordPipeline"""
+        test_pdf = self.test_dir / "pause_resume_sample.pdf"
+        doc = fitz.open()
+        for i in range(3):
+            page = doc.new_page()
+            page.insert_text((72, 72), f"Page {i + 1} content")
+        doc.save(str(test_pdf))
+        doc.close()
+
+        out_docx = self.test_dir / "pause_resume_output.docx"
+        pipeline = PDFToWordPipeline(api_key="test_api_key", models=["gemini-3.6-flash"], max_workers=1)
+
+        progress_records = []
+        def progress_cb(cur, tot, msg):
+            progress_records.append((cur, tot, msg))
+
+        def mock_extract(*args, **kwargs):
+            time.sleep(0.2)
+            return ("# Page Title\nSample text", "gemini-3.6-flash", "Cordia New")
+
+        with patch("src.pipeline.GeminiExtractor") as MockExtractorCls:
+            mock_inst = MagicMock()
+            mock_inst.extract_page_markdown.side_effect = mock_extract
+            mock_inst.current_model = "gemini-3.6-flash"
+            MockExtractorCls.return_value = mock_inst
+
+            t = threading.Thread(target=lambda: pipeline.convert(test_pdf, out_docx, progress_callback=progress_cb))
+            t.start()
+
+            # รอให้เริ่มประมวลผลหน้าแรก แล้วสั่ง pause
+            time.sleep(0.3)
+            pipeline.pause()
+            self.assertTrue(pipeline.is_paused)
+            count_at_pause = len(progress_records)
+
+            # รอสักครู่เพื่อพิสูจน์ว่าระบบหยุดจริง ไม่มีความคืบหน้าเพิ่ม
+            time.sleep(0.5)
+            self.assertEqual(len(progress_records), count_at_pause)
+
+            # สั่ง resume และรอจนเสร็จสิ้น
+            pipeline.resume()
+            self.assertFalse(pipeline.is_paused)
+
+            t.join(timeout=8.0)
+            self.assertFalse(t.is_alive())
+            self.assertTrue(out_docx.exists())
+
+        print("✅ ทดสอบ Pipeline Pause & Resume (หยุดชั่วคราวและเริ่มทำงานต่อ) สำเร็จ")
+
+    def test_pipeline_cancellation(self):
+        """ทดสอบระบบยกเลิกการทำงาน (Cancel) ใน PDFToWordPipeline"""
+        test_pdf = self.test_dir / "cancel_sample.pdf"
+        doc = fitz.open()
+        for i in range(3):
+            page = doc.new_page()
+            page.insert_text((72, 72), f"Page {i + 1} content")
+        doc.save(str(test_pdf))
+        doc.close()
+
+        out_docx = self.test_dir / "cancel_output.docx"
+        pipeline = PDFToWordPipeline(api_key="test_api_key", models=["gemini-3.6-flash"], max_workers=1)
+
+        def mock_extract(*args, **kwargs):
+            time.sleep(0.2)
+            return ("# Page Title\nSample text", "gemini-3.6-flash", "Cordia New")
+
+        with patch("src.pipeline.GeminiExtractor") as MockExtractorCls:
+            mock_inst = MagicMock()
+            mock_inst.extract_page_markdown.side_effect = mock_extract
+            mock_inst.current_model = "gemini-3.6-flash"
+            MockExtractorCls.return_value = mock_inst
+
+            errors = []
+            def run_cancel():
+                try:
+                    pipeline.convert(test_pdf, out_docx)
+                except Exception as e:
+                    errors.append(str(e))
+
+            t = threading.Thread(target=run_cancel)
+            t.start()
+
+            time.sleep(0.1)
+            pipeline.cancel()
+            self.assertTrue(pipeline.is_cancelled)
+
+            t.join(timeout=5.0)
+            self.assertFalse(t.is_alive())
+            self.assertTrue(any("ยกเลิก" in err for err in errors))
+
+        print("✅ ทดสอบ Pipeline Cancellation (ยกเลิกการทำงานกลางคัน) สำเร็จ")
 
 
 if __name__ == "__main__":
