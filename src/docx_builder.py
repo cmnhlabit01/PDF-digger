@@ -396,6 +396,14 @@ class DocxBuilder:
         num_cols = max(len(r) for r in parsed_rows)
         num_rows = len(parsed_rows)
 
+        if num_cols == 0 or num_rows == 0:
+            return
+
+        # เติมเต็มเซลล์ว่างให้ทุกแถวมีจำนวนคอลัมน์เท่ากับ num_cols พอดี ป้องกัน IndexError: list index out of range
+        for r in parsed_rows:
+            while len(r) < num_cols:
+                r.append("")
+
         # ตรวจสอบและตรวจจับอัตโนมัติ (Smart Auto-detection สำหรับรายงานผลแล็บและบล็อกลายเซ็น)
         all_text = " ".join(" ".join(r) for r in parsed_rows).lower()
         if not is_borderless and not is_horizontal_only:
@@ -451,10 +459,15 @@ class DocxBuilder:
         for col in range(num_cols):
             r = 0
             while r < num_rows:
-                if parsed_rows[r][col].strip():
+                if col < len(parsed_rows[r]) and parsed_rows[r][col].strip():
                     start_r = r
                     r += 1
-                    while r < num_rows and not parsed_rows[r][col].strip() and any(parsed_rows[r][c].strip() for c in range(num_cols)):
+                    while (
+                        r < num_rows
+                        and col < len(parsed_rows[r])
+                        and not parsed_rows[r][col].strip()
+                        and any((c < len(parsed_rows[r]) and bool(parsed_rows[r][c].strip())) for c in range(num_cols))
+                    ):
                         r += 1
                     if r - 1 > start_r:
                         table.rows[start_r].cells[col].merge(table.rows[r - 1].cells[col])
@@ -509,7 +522,7 @@ class DocxBuilder:
                 for line_idx, cell_line in enumerate(cell_lines):
                     line_str = cell_line.strip()
                     if line_idx == 0:
-                        p = cell.paragraphs[0]
+                        p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
                     else:
                         p = cell.add_paragraph()
 

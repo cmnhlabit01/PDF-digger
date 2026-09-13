@@ -559,6 +559,37 @@ class TestPDFDigger(unittest.TestCase):
 
         print("✅ ทดสอบ Table Vertical Merging, Badges, Cell Headings & Entity Decoding สำเร็จ")
 
+    def test_uneven_table_columns_handling(self):
+        """ทดสอบการจัดการตาราง Markdown ที่แต่ละแถวมีจำนวนคอลัมน์ไม่เท่ากัน เพื่อป้องกัน IndexError: list index out of range"""
+        builder = DocxBuilder(font_name="Cordia New")
+
+        # ตารางที่แถว 1 มี 4 คอลัมน์, แถว 2 มี 2 คอลัมน์, แถว 3 มี 1 คอลัมน์ (เช่น แถวสรุปผล)
+        md_content = (
+            "| รหัส | สินค้า | จำนวน | ราคา |\n"
+            "|---|---|---|---|\n"
+            "| 01 | ดินสอ | 2 | 20 |\n"
+            "| หมายเหตุ: ชำระผ่านบัตร |\n"
+            "| รวมสุทธิ | 20 |\n"
+        )
+
+        # ต้องทำงานได้โดยไม่ raise IndexError
+        builder.add_page_content(
+            markdown_text=md_content,
+            page_num=1,
+            is_first_page=True,
+        )
+
+        out_path = self.test_dir / "test_uneven_table.docx"
+        builder.save(out_path)
+        self.assertTrue(out_path.exists())
+
+        doc = docx.Document(str(out_path))
+        self.assertEqual(len(doc.tables), 1)
+        tbl = doc.tables[0]
+        # ต้องมี 4 คอลัมน์เท่ากับจำนวนคอลัมน์สูงสุด
+        self.assertEqual(len(tbl.columns), 4)
+        print("✅ ทดสอบ Uneven Table Columns Handling (ป้องกัน list index out of range) สำเร็จ")
+
 
 if __name__ == "__main__":
     unittest.main()

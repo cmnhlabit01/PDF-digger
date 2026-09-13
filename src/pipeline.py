@@ -179,7 +179,7 @@ class PDFToWordPipeline:
         raw_results.sort(key=lambda x: x[0])
 
         # ตรวจสอบฟอนต์จากหน้าแรกหากตรวจไม่พบจาก PDF ดิจิทัล
-        if raw_results:
+        if raw_results and len(raw_results[0]) > 4:
             page_0_font = raw_results[0][4]
             if not detected_font and page_0_font and (not self.font_name or self.font_name.lower() == "auto"):
                 detected_font = page_0_font

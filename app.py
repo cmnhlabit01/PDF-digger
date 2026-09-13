@@ -159,10 +159,11 @@ def main():
                 st.image(str(tmp_file_path), caption=uploaded_file.name, use_container_width=True)
             else:
                 with fitz.open(tmp_file_path) as doc:
-                    page_0 = doc[0]
-                    pix = page_0.get_pixmap(dpi=150)
-                    img_bytes = pix.tobytes(output="png")
-                    st.image(img_bytes, caption="ตัวอย่างหน้า 1", use_container_width=True)
+                    if len(doc) > 0:
+                        page_0 = doc[0]
+                        pix = page_0.get_pixmap(dpi=150)
+                        img_bytes = pix.tobytes(output="png")
+                        st.image(img_bytes, caption="ตัวอย่างหน้า 1", use_container_width=True)
 
         st.divider()
 
