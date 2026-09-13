@@ -5,12 +5,16 @@ from dotenv import load_dotenv
 # โหลดตัวแปรจาก .env ถ้ามี
 load_dotenv()
 
-# รายชื่อโมเดลสำหรับการทำ Seamless Fallback (หากตัวแรกติด 429 Quota Exceeded จะสลับไปตัวถัดไปทันที)
+# รายชื่อโมเดลสำหรับการทำ Seamless Fallback (จัดลำดับตามความพร้อมและโควตาใช้งาน)
 FALLBACK_MODELS = [
-    "gemini-3.6-flash",
+    "gemini-3.5-flash",
     "gemini-3.7-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.6-flash",
     "gemini-flash-latest",
     "gemini-3-flash-preview",
+    "gemini-3.8-flash",
 ]
 
 # ฟอนต์มาตรฐานสำหรับไฟล์ Word
@@ -63,8 +67,8 @@ def get_font_sizes(font_name: str) -> dict:
 # การเรนเดอร์ภาพหน้า PDF สำหรับส่งให้ Gemini อ่าน (200 DPI คมชัดระดับสิ่งพิมพ์และประมวลผลเร็วกว่า 300 DPI ถึง 2.25 เท่า)
 RENDER_DPI = 200
 
-# จำนวนหน้าที่จะประมวลผลพร้อมกันในเวลาเดียวกัน (Parallel Workers) ช่วยลดเวลาทำงานลง 3-4 เท่า
-MAX_PARALLEL_WORKERS = 3
+# จำนวนหน้าที่จะประมวลผลพร้อมกันในเวลาเดียวกัน (Parallel Workers) เหมาะสมกับ Rate Limit ของ API
+MAX_PARALLEL_WORKERS = 2
 
 # ขนาดรูปภาพสูงสุดสำหรับแทรกลงในไฟล์ Word (นิ้ว)
 MAX_DOCX_IMAGE_WIDTH_INCHES = 6.0

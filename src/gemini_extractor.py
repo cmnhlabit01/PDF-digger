@@ -271,12 +271,26 @@ class GeminiExtractor:
         self.current_model_idx = 0
         self.on_fallback = on_fallback
         self._lock = threading.Lock()
+        self._model_cooldowns: dict[str, float] = {}  # model_name -> unblock timestamp
         self.client = genai.Client(api_key=self.api_key)
 
     @property
     def current_model(self) -> str:
         with self._lock:
             return self.models[self.current_model_idx]
+
+    def _is_model_cooling_down(self, model_name: str) -> bool:
+        with self._lock:
+            until = self._model_cooldowns.get(model_name, 0.0)
+            return time.time() < until
+
+    def _set_model_cooldown(self, model_name: str, duration_sec: float):
+        with self._lock:
+            self._model_cooldowns[model_name] = time.time() + duration_sec
+
+    def _clear_model_cooldown(self, model_name: str):
+        with self._lock:
+            self._model_cooldowns.pop(model_name, None)
 
     def extract_page_markdown(
         self,
@@ -339,103 +353,149 @@ class GeminiExtractor:
         mime_type = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
-        attempts = 0
-        max_attempts = len(self.models) * 2  # ให้โอกาสลองใหม่
+        max_rounds = 2
+        for round_idx in range(max_rounds):
+            with self._lock:
+                start_idx = self.current_model_idx
+                candidate_models = [
+                    self.models[(start_idx + i) % len(self.models)]
+                    for i in range(len(self.models))
+                ]
 
-        while attempts < max_attempts:
-            attempts += 1
-            model_name = self.current_model
-            try:
-                logger.info(f"[Page {page_num + 1}] ส่งให้โมเดล {model_name} ประมวลผล (ภาษา: {target_language})...")
+            # ตรวจสอบว่ามีโมเดลที่ไม่อยู่ใน cooldown หรือไม่
+            non_cooling = [m for m in candidate_models if not self._is_model_cooling_down(m)]
+            models_to_try = non_cooling if non_cooling else candidate_models
 
-                response = self.client.models.generate_content(
-                    model=model_name,
-                    contents=[image_part, prompt],
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        response_mime_type="application/json",
-                        temperature=0.1,  # ควบคุมให้ออกมาตรงตามต้นฉบับ ไม่แต่งเติม
-                    ),
-                )
+            # หากทุกโมเดลติด cooldown และเวลารอไม่นาน ให้รอก่อนลอง
+            if not non_cooling and len(self.models) > 1:
+                with self._lock:
+                    now = time.time()
+                    waits = [max(0.0, self._model_cooldowns.get(m, 0.0) - now) for m in self.models]
+                min_wait = min(waits) if waits else 0.0
+                if 0 < min_wait <= 35:
+                    logger.info(f"[Page {page_num + 1}] โมเดลทั้งหมดติด Cooldown ชั่วคราว รอ {min_wait:.1f} วินาที...")
+                    time.sleep(min_wait + 0.5)
 
-                text = response.text or ""
-                detected_font = None
+            for model_name in models_to_try:
+                try:
+                    logger.info(f"[Page {page_num + 1}] ส่งให้โมเดล {model_name} ประมวลผล (ภาษา: {target_language})...")
 
-                # ตรวจสอบและ Normalize ผลลัพธ์ Structural JSON ทุกรูปแบบ (Object, Array, Nested)
-                is_valid_json, normalized_data, detected_font_cand = unwrap_gemini_json(text)
-                if is_valid_json and normalized_data:
-                    if detected_font_cand:
-                        detected_font = detected_font_cand
-                    self._clean_thai_in_blocks(normalized_data["blocks"])
-                    text = json.dumps(normalized_data, ensure_ascii=False)
-                else:
-                    # หากไม่ใช่ JSON ที่สมบูรณ์ ให้ตรวจสอบว่ามีรหัส JSON ปนเปื้อนหรือไม่ (Anti-leak guard)
-                    if is_raw_json_code(text):
-                        logger.warning(f"[Page {page_num + 1}] ตรวจพบโค้ด JSON หลุดจากโมเดล ทำการสกัดเฉพาะข้อความจริง...")
-                        clean_lines = fallback_extract_text_from_broken_json(text)
-                        text = "\n\n".join(clean_lines)
-                    else:
-                        font_match = re.search(r"\[FONT:\s*([^\]]+)\]", text)
-                        if font_match:
-                            raw_font = font_match.group(1).strip()
-                            detected_font = clean_font_name(raw_font)
-                            text = re.sub(r"\[FONT:\s*[^\]]+\]\n?", "", text).strip()
-                        text = clean_thai_ocr_text(text)
-
-                return text.strip(), model_name, detected_font
-
-            except Exception as e:
-                err_str = str(e)
-                logger.warning(
-                    f"เกิดข้อผิดพลาดกับโมเดล {model_name} (หน้า {page_num + 1}): {err_str}"
-                )
-
-                is_503_error = (
-                    "503" in err_str
-                    or "UNAVAILABLE" in err_str
-                    or "high demand" in err_str.lower()
-                )
-                is_quota_error = (
-                    "429" in err_str
-                    or "RESOURCE_EXHAUSTED" in err_str
-                    or "quota" in err_str.lower()
-                    or "rate limit" in err_str.lower()
-                )
-
-                if is_503_error:
-                    reason = "เซิร์ฟเวอร์ติดคิวยาวชั่วคราว (503 High Demand)"
-                elif is_quota_error:
-                    reason = "โควตาเต็ม (429 Quota Exceeded)"
-                else:
-                    reason = f"ข้อผิดพลาด: {err_str[:60]}"
-
-                # สลับไปใช้โมเดลถัดไปใน fallback list
-                if len(self.models) > 1:
-                    with self._lock:
-                        prev_model = self.models[self.current_model_idx]
-                        self.current_model_idx = (self.current_model_idx + 1) % len(self.models)
-                        next_model = self.models[self.current_model_idx]
-
-                    logger.warning(
-                        f"🔄 ระบบสลับโมเดลอัตโนมัติ: {prev_model} ➔ {next_model} (สาเหตุ: {reason})"
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=[image_part, prompt],
+                        config=types.GenerateContentConfig(
+                            system_instruction=SYSTEM_PROMPT,
+                            response_mime_type="application/json",
+                            temperature=0.1,  # ควบคุมให้ออกมาตรงตามต้นฉบับ ไม่แต่งเติม
+                        ),
                     )
 
-                    if self.on_fallback:
-                        try:
-                            self.on_fallback(prev_model, next_model, reason)
-                        except Exception as cb_err:
-                            logger.error(f"Error ใน callback on_fallback: {cb_err}")
+                    text = response.text or ""
+                    detected_font = None
 
-                    # พักสักครู่ก่อนลองโมเดลถัดไป (สำหรับ 503 ให้รอ 2 วินาที)
-                    sleep_time = 2.0 if is_503_error else 1.0
-                    time.sleep(sleep_time)
-                    continue
-                else:
-                    # หากมีโมเดลเดียวและติดโควตา ให้รอสักครู่แล้วลองใหม่
-                    if is_quota_error:
-                        logger.info("มีโมเดลเดียว รอ 5 วินาทีแล้วลองใหม่...")
-                        time.sleep(5.0)
-                        continue
+                    # ตรวจสอบและ Normalize ผลลัพธ์ Structural JSON ทุกรูปแบบ (Object, Array, Nested)
+                    is_valid_json, normalized_data, detected_font_cand = unwrap_gemini_json(text)
+                    if is_valid_json and normalized_data:
+                        if detected_font_cand:
+                            detected_font = detected_font_cand
+                        self._clean_thai_in_blocks(normalized_data["blocks"])
+                        text = json.dumps(normalized_data, ensure_ascii=False)
+                    else:
+                        # หากไม่ใช่ JSON ที่สมบูรณ์ ให้ตรวจสอบว่ามีรหัส JSON ปนเปื้อนหรือไม่ (Anti-leak guard)
+                        if is_raw_json_code(text):
+                            logger.warning(f"[Page {page_num + 1}] ตรวจพบโค้ด JSON หลุดจากโมเดล ทำการสกัดเฉพาะข้อความจริง...")
+                            clean_lines = fallback_extract_text_from_broken_json(text)
+                            text = "\n\n".join(clean_lines)
+                        else:
+                            font_match = re.search(r"\[FONT:\s*([^\]]+)\]", text)
+                            if font_match:
+                                raw_font = font_match.group(1).strip()
+                                detected_font = clean_font_name(raw_font)
+                                text = re.sub(r"\[FONT:\s*[^\]]+\]\n?", "", text).strip()
+                            text = clean_thai_ocr_text(text)
+
+                    # สำเร็จ: ปรับให้หน้านี้และหน้าถัดไปใช้โมเดลนี้เป็นโมเดลหลัก
+                    with self._lock:
+                        if model_name in self.models:
+                            self.current_model_idx = self.models.index(model_name)
+                    self._clear_model_cooldown(model_name)
+
+                    return text.strip(), model_name, detected_font
+
+                except Exception as e:
+                    err_str = str(e)
+                    logger.warning(
+                        f"เกิดข้อผิดพลาดกับโมเดล {model_name} (หน้า {page_num + 1}): {err_str}"
+                    )
+
+                    is_503_error = (
+                        "503" in err_str
+                        or "UNAVAILABLE" in err_str
+                        or "high demand" in err_str.lower()
+                    )
+                    is_quota_error = (
+                        "429" in err_str
+                        or "RESOURCE_EXHAUSTED" in err_str
+                        or "quota" in err_str.lower()
+                        or "rate limit" in err_str.lower()
+                    )
+
+                    if is_503_error:
+                        reason = "เซิร์ฟเวอร์ติดคิวยาวชั่วคราว (503 High Demand)"
+                        cooldown_sec = 3.0
+                        sleep_time = 1.5
+                    elif is_quota_error:
+                        reason = "โควตาเต็ม (429 Quota Exceeded)"
+                        if "perday" in err_str.lower() or "free_tier_requests" in err_str.lower():
+                            cooldown_sec = 3600.0  # โควตารายวันเต็ม พัก 1 ชั่วโมง
+                        else:
+                            delay_match = re.search(r"retryDelay['\"]?\s*:\s*['\"]?(\d+)s?", err_str)
+                            if delay_match:
+                                cooldown_sec = float(delay_match.group(1)) + 2.0
+                            else:
+                                cooldown_sec = 30.0
+                        sleep_time = 1.0
+                    else:
+                        reason = f"ข้อผิดพลาด: {err_str[:60]}"
+                        cooldown_sec = 15.0
+                        sleep_time = 1.0
+
+                    self._set_model_cooldown(model_name, cooldown_sec)
+
+                    # สลับไปใช้โมเดลถัดไปใน fallback list
+                    if len(self.models) > 1:
+                        next_idx = (self.models.index(model_name) + 1) % len(self.models)
+                        next_model = self.models[next_idx]
+                        with self._lock:
+                            self.current_model_idx = next_idx
+
+                        logger.warning(
+                            f"🔄 ระบบสลับโมเดลอัตโนมัติ: {model_name} ➔ {next_model} (สาเหตุ: {reason})"
+                        )
+
+                        if self.on_fallback:
+                            try:
+                                self.on_fallback(model_name, next_model, reason)
+                            except Exception as cb_err:
+                                logger.error(f"Error ใน callback on_fallback: {cb_err}")
+
+                        time.sleep(sleep_time)
+                    else:
+                        if is_quota_error:
+                            logger.info("มีโมเดลเดียว รอ 5 วินาทีแล้วลองใหม่...")
+                            time.sleep(5.0)
+
+            # หากจบ Candidate Models ในรอบแรกแล้ว ให้ดูว่ามี cooldown สั้นที่รอได้หรือไม่
+            if round_idx < max_rounds - 1:
+                with self._lock:
+                    now = time.time()
+                    waits = [max(0.0, self._model_cooldowns.get(m, 0.0) - now) for m in self.models]
+                short_waits = [cd for cd in waits if 0 < cd <= 35]
+                if short_waits:
+                    wait_sec = min(short_waits) + 0.5
+                    logger.info(f"[Page {page_num + 1}] โมเดลทั้งหมดติดสถานะชั่วคราว รอ {wait_sec:.1f} วินาทีเพื่อลองใหม่...")
+                    time.sleep(wait_sec)
+
         raise RuntimeError(f"ไม่สามารถประมวลผลหน้า {page_num + 1} ได้หลังจากลองทุกโมเดลแล้ว")
 
     def _clean_thai_in_blocks(self, blocks: list):

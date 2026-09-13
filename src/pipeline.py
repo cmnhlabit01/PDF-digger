@@ -182,8 +182,9 @@ class PDFToWordPipeline:
                     return None
                 time.sleep(0.2)
 
-            if self._cancel_event.is_set():
-                return None
+            # สลับเวลาการส่งคำขอไปยัง API เล็กน้อยเพื่อป้องกัน Burst Rate Limit
+            if effective_workers > 1 and p_idx > 0:
+                time.sleep(min(0.6 * (p_idx % effective_workers), 1.5))
 
             md_text, m_used, p_font = extractor.extract_page_markdown(
                 p_data.rendered_image_bytes,

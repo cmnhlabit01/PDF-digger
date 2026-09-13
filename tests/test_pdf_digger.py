@@ -1087,6 +1087,45 @@ class TestPDFDigger(unittest.TestCase):
 
         print("✅ ทดสอบ JSON Array Unwrapping & Anti-Leak Guard (ป้องกันโค้ด JSON หลุดลง Word 100%) สำเร็จ")
 
+    def test_cooldown_tracking_and_resilient_fallback(self):
+        """ทดสอบระบบ Cooldown Tracking และข้ามโมเดลที่ติดโควตาอย่างชาญฉลาด"""
+        from src.gemini_extractor import GeminiExtractor
+
+        with patch("src.gemini_extractor.genai.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            # กำหนดลำดับโมเดล: M1 (ติด 429), M2 (ทำงานได้), M3 (สำรอง)
+            models = ["model-quota-full", "model-healthy", "model-backup"]
+            extractor = GeminiExtractor(api_key="fake-key", models=models)
+
+            called_models = []
+
+            def mock_gen(model, contents, config):
+                called_models.append(model)
+                if model == "model-quota-full":
+                    raise Exception("429 RESOURCE_EXHAUSTED. retryDelay: 30s")
+                mock_resp = MagicMock()
+                mock_resp.text = '{"page_type": "document", "blocks": [{"type": "paragraph", "text": "OK"}]}'
+                return mock_resp
+
+            mock_client.models.generate_content.side_effect = mock_gen
+
+            # หน้า 1: ลอง M1 -> ติด 429 -> สลับไป M2 -> สำเร็จ
+            res1, used1, _ = extractor.extract_page_markdown(b"fake-bytes", 0)
+            self.assertEqual(used1, "model-healthy")
+            self.assertEqual(called_models, ["model-quota-full", "model-healthy"])
+            self.assertTrue(extractor._is_model_cooling_down("model-quota-full"))
+
+            # หน้า 2: ต้องจำได้ว่า M1 ติด cooldown และ M2 เป็น working model ล่าสุด
+            # ดังนั้นต้องเรียก M2 ทันทีโดยไม่ต้องเสียเวลาไปเรียก M1 ให้ error อีก!
+            called_models.clear()
+            res2, used2, _ = extractor.extract_page_markdown(b"fake-bytes", 1)
+            self.assertEqual(used2, "model-healthy")
+            self.assertEqual(called_models, ["model-healthy"])
+
+            print("✅ ทดสอบ Cooldown Tracking & Resilient Multi-Model Fallback สำเร็จ")
+
 
 if __name__ == "__main__":
     unittest.main()
